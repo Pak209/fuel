@@ -172,10 +172,36 @@ actor LocalNotificationScheduler: NotificationScheduling {
     static let reminderPrefix = "fuel.reminder."
     private let center: UNUserNotificationCenter
     private let planner: ReminderPlanner
+    private var lastAppliedPreferences: UserPreferences?
+    private var timeZoneObserver: NSObjectProtocol?
 
     init(center: UNUserNotificationCenter = .current(), planner: ReminderPlanner = .init()) {
         self.center = center
         self.planner = planner
+        Task { await self.observeTimeZoneChanges() }
+    }
+
+    deinit {
+        if let timeZoneObserver {
+            NotificationCenter.default.removeObserver(timeZoneObserver)
+        }
+    }
+
+    /// Reschedules pending reminders whenever the device timezone changes, since
+    /// UNCalendarNotificationTrigger dates are interpreted in the current device
+    /// timezone and won't otherwise adjust on their own.
+    private func observeTimeZoneChanges() {
+        timeZoneObserver = NotificationCenter.default.addObserver(
+            forName: NSNotification.Name.NSSystemTimeZoneDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] _ in
+            guard let self else { return }
+            Task {
+                guard let preferences = await self.lastAppliedPreferences else { return }
+                try? await self.apply(preferences: preferences, requestingAuthorization: false)
+            }
+        }
     }
 
     func authorizationState() async -> NotificationAuthorizationState {
@@ -209,6 +235,8 @@ actor LocalNotificationScheduler: NotificationScheduling {
         for reminder in planner.recurringReminders(for: preferences) {
             try await center.add(request(for: reminder))
         }
+
+        lastAppliedPreferences = preferences
     }
 
     func scheduleHealthConnectionIssue(ifEnabled preferences: UserPreferences) async throws {
@@ -217,8 +245,21 @@ actor LocalNotificationScheduler: NotificationScheduling {
         guard state == .authorized || state == .provisional else { return }
         let reminder = planner.healthConnectionReminder()
         let content = content(for: reminder)
-        let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
-        try await center.add(.init(identifier: reminder.identifier, content: content, trigger: trigger))
+
+        let currentHour = Calendar.current.component(.hour, from: Date())
+        if planner.isQuiet(hour: currentHour, start: preferences.quietHoursStart, end: preferences.quietHoursEnd) {
+            // Quiet hours are in effect—defer to the next allowed hour instead of
+            // interrupting the user right now.
+            let nextAllowedHour = min(max(preferences.quietHoursEnd, 0), 23)
+            let trigger = UNCalendarNotificationTrigger(
+                dateMatching: DateComponents(hour: nextAllowedHour, minute: 0),
+                repeats: false
+            )
+            try await center.add(.init(identifier: reminder.identifier, content: content, trigger: trigger))
+        } else {
+            let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
+            try await center.add(.init(identifier: reminder.identifier, content: content, trigger: trigger))
+        }
     }
 
     func removeAllFuelNotifications() async {

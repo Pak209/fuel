@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>FUEL_BACKEND_ENVIRONMENT</key>
+	<string>$(FUEL_BACKEND_ENVIRONMENT)</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.pak.fuel</string>
+			<key>CFBundleTypeRole</key>
+			<string>Editor</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>fuel</string>
+			</array>
+		</dict>
+	</array>
+	<key>UIApplicationShortcutItems</key>
+	<array>
+		<dict>
+			<key>UIApplicationShortcutItemType</key>
+			<string>com.pak.fuel.scan</string>
+			<key>UIApplicationShortcutItemTitle</key>
+			<string>Scan a meal</string>
+			<key>UIApplicationShortcutItemSubtitle</key>
+			<string>Open the meal camera</string>
+			<key>UIApplicationShortcutItemIconSymbolName</key>
+			<string>camera.viewfinder</string>
+		</dict>
+	</array>
+</dict>
+</plist>

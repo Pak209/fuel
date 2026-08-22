@@ -23,9 +23,12 @@ struct TodayView: View {
                         notifications: { sheet = .notifications },
                         profile: { state.selectedTab = .profile }
                     )
-                    Button { sheet = .score } label: { CompactHealthScoreCard(score: state.healthScore) }.buttonStyle(.plain)
+                    Button { sheet = .score } label: { CompactHealthScoreCard(score: state.healthScore) }
+                        .buttonStyle(.plain)
+                        .accessibilityIdentifier("todayHealthScoreButton")
                     DailyMetricsRow(snapshot: state.snapshot, balance: state.calorieBalance)
                     RecommendationCard(recommendation: state.recommendation) { sheet = .recommendation }
+                        .accessibilityIdentifier("todayRecommendationButton")
                     TodayTimeline(
                         snapshot: state.snapshot,
                         onMeal: openMeal,
@@ -107,7 +110,7 @@ struct TodayView: View {
     private func openMeal(_ summary: MealSummary) {
         do {
             if let meal = try state.meal(id: summary.id) { sheet = .meal(meal) }
-        } catch { errorMessage = error.localizedDescription }
+        } catch { fail(error) }
     }
 
     private func completeMeal(_ summary: MealSummary) {
@@ -115,8 +118,14 @@ struct TodayView: View {
             do {
                 guard let meal = try state.meal(id: summary.id) else { return }
                 try await state.completePlannedMeal(meal)
-            } catch { errorMessage = error.localizedDescription }
+            } catch { fail(error) }
         }
+    }
+
+    private func fail(_ error: Error) {
+        let message = error.localizedDescription
+        errorMessage = message
+        AccessibilityNotification.Announcement(message).post()
     }
 }
 
@@ -171,18 +180,21 @@ private struct DashboardHeader: View {
                     .minimumScaleFactor(0.82)
             }
             HStack(spacing: 8) {
-                Button(action: previousDay) { Image(systemName: "chevron.left") }
+                Button(action: previousDay) { Image(systemName: "chevron.left").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }
                     .accessibilityLabel("Previous day")
+                    .accessibilityIdentifier("todayPreviousDayButton")
                 Button(action: chooseDate) {
                     Text(dateLabel)
                         .font(.caption.bold())
                         .lineLimit(1)
                         .minimumScaleFactor(0.55)
-                        .frame(maxWidth: .infinity)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
-                Button(action: nextDay) { Image(systemName: "chevron.right") }
+                .accessibilityIdentifier("todayDatePickerButton")
+                Button(action: nextDay) { Image(systemName: "chevron.right").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }
                     .disabled(Calendar.autoupdatingCurrent.isDateInToday(selectedDate))
                     .accessibilityLabel("Next day")
+                    .accessibilityIdentifier("todayNextDayButton")
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -199,14 +211,20 @@ private struct DashboardHeader: View {
                     .overlay(alignment: .topTrailing) {
                         Circle().fill(.red).frame(width: 7, height: 7).offset(x: -4, y: 4)
                     }
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("Notifications")
+            .accessibilityIdentifier("todayNotificationsButton")
             Button(action: profile) {
                 Image(systemName: "person.crop.circle.fill")
                     .font(.system(size: 35))
                     .foregroundStyle(.orange)
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
             }
             .accessibilityLabel("\(firstName)’s profile")
+            .accessibilityIdentifier("todayProfileButton")
         }
     }
 
@@ -388,7 +406,11 @@ private struct TodayTimeline: View {
             HStack {
                 Text("Today’s Timeline").font(.headline)
                 Spacer()
-                Button("Add event", action: onAddEvent).font(.caption.bold())
+                Button("Add event", action: onAddEvent)
+                    .font(.caption.bold())
+                    .frame(minWidth: 44, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .accessibilityIdentifier("todayAddMealButton")
             }
             .padding(.bottom, 4)
             if snapshot.meals.isEmpty {
@@ -406,6 +428,8 @@ private struct TodayTimeline: View {
                     .buttonStyle(.plain)
                     if meal.status == .planned {
                         Button { onCompleteMeal(meal) } label: { Image(systemName: "circle").foregroundStyle(FuelTheme.orange) }
+                            .frame(minWidth: 44, minHeight: 44)
+                            .contentShape(Rectangle())
                             .accessibilityLabel("Mark \(meal.name) completed")
                     }
                 }
@@ -420,10 +444,12 @@ private struct TodayTimeline: View {
                 TimelineRow(icon: "drop", color: FuelTheme.blue, title: "Water", time: "All day", item: "\(Int(snapshot.nutrition.hydrationMilliliters).formatted()) ml", detail: "Tap to add 250 ml", complete: nil)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("todayAddWaterButton")
             Button(action: onSleep) {
                 TimelineRow(icon: "moon", color: FuelTheme.purple, title: "Sleep", time: "Last night", item: sleepValue, detail: snapshot.sleep.quality, complete: nil)
             }
             .buttonStyle(.plain)
+            .accessibilityIdentifier("todaySleepButton")
         }.cardStyle(padding: 12)
     }
 

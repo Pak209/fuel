@@ -1,3 +1,4 @@
+import Accessibility
 import Charts
 import SwiftUI
 
@@ -8,6 +9,7 @@ struct InsightsView: View {
     @State private var report: InsightsReport?
     @State private var isLoading = true
     @State private var errorMessage: String?
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         ZStack {
@@ -38,10 +40,18 @@ struct InsightsView: View {
 
     private func summary(_ report: InsightsReport) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                summaryMetric("\(report.loggedDays)/\(report.requestedDays)", "Logged days")
-                summaryMetric(report.averageCalories.formatted(), "Avg calories")
-                summaryMetric("\(Int(report.averageProtein))g", "Avg protein")
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(alignment: .leading, spacing: 12) {
+                    summaryMetric("\(report.loggedDays)/\(report.requestedDays)", "Logged days")
+                    summaryMetric(report.averageCalories.formatted(), "Avg calories")
+                    summaryMetric("\(Int(report.averageProtein))g", "Avg protein")
+                }
+            } else {
+                HStack {
+                    summaryMetric("\(report.loggedDays)/\(report.requestedDays)", "Logged days")
+                    summaryMetric(report.averageCalories.formatted(), "Avg calories")
+                    summaryMetric("\(Int(report.averageProtein))g", "Avg protein")
+                }
             }
             ProgressView(value: report.dataCompleteness)
                 .tint(FuelTheme.green)
@@ -69,6 +79,7 @@ struct InsightsView: View {
             }
             .chartYAxisLabel("Calories")
             .frame(height: 190)
+            .accessibilityChartDescriptor(TrendChartDescriptor(report: report))
             Text("Days without meals remain visible as missing logs rather than being removed from the range.")
                 .font(.caption)
                 .foregroundStyle(FuelTheme.secondary)
@@ -119,6 +130,50 @@ struct InsightsView: View {
             errorMessage = error.localizedDescription
         }
         isLoading = false
+    }
+}
+
+/// Provides an Audio Graph / VoiceOver rotor representation of the logged-energy
+/// trend chart, built from the same `DailyTrendPoint` series the visual chart uses.
+private struct TrendChartDescriptor: AXChartDescriptorRepresentable {
+    let report: InsightsReport
+
+    func makeChartDescriptor() -> AXChartDescriptor {
+        let calories = report.trends.map(\.calories)
+        let minCalories = calories.min() ?? 0
+        let maxCalories = max(calories.max() ?? 1, minCalories + 1)
+
+        let xAxis = AXCategoricalDataAxisDescriptor(
+            title: "Day",
+            categoryOrder: report.trends.map { $0.date.formatted(date: .abbreviated, time: .omitted) }
+        )
+
+        let yAxis = AXNumericDataAxisDescriptor(
+            title: "Calories",
+            range: minCalories...maxCalories,
+            gridlinePositions: []
+        ) { value in "\(Int(value)) calories" }
+
+        let series = AXDataSeriesDescriptor(
+            name: "Logged energy",
+            isContinuous: false,
+            dataPoints: report.trends.map { point in
+                AXDataPoint(
+                    x: point.date.formatted(date: .abbreviated, time: .omitted),
+                    y: point.calories,
+                    label: point.date.formatted(date: .abbreviated, time: .omitted)
+                )
+            }
+        )
+
+        return AXChartDescriptor(
+            title: "Logged energy",
+            summary: report.accessibleSummary,
+            xAxis: xAxis,
+            yAxis: yAxis,
+            additionalAxes: [],
+            series: [series]
+        )
     }
 }
 

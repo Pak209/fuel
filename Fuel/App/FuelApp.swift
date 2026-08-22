@@ -1,14 +1,26 @@
 import SwiftUI
 import SwiftData
+import CoreSpotlight
 
 @main
 struct FuelApp: App {
     @UIApplicationDelegateAdaptor(NotificationRouteCoordinator.self) private var notificationRouteCoordinator
     @State private var appState = AppState()
+    @State private var hasEndedColdLaunchSignpost = false
     private let container: ModelContainer
     private let startupError: String?
+    /// Begun in `init()` (true process cold launch) and ended once the first
+    /// scene body has appeared — see `hasEndedColdLaunchSignpost` below. Kept
+    /// out of `body`/view code so it never re-fires on state-driven re-renders.
+    private let coldLaunchSignpost = FuelSignpost.begin(.coldLaunch)
 
     init() {
+        // Best-effort, one-time startup side effects. Neither of these touches
+        // any view — they run once per process launch, before `body` is ever
+        // evaluated, and must never run again on a state-driven re-render.
+        if FeatureFlagStore.shared.resolvedValue(for: .metricKitCollectionEnabled) {
+            MetricsCollector.shared.start()
+        }
         let schema = Schema(versionedSchema: FuelSchemaV3.self)
         #if DEBUG
         if ProcessInfo.processInfo.arguments.contains("-FuelDemoData") {
@@ -44,6 +56,24 @@ struct FuelApp: App {
             }
                 .preferredColorScheme(appState.preferences.appearance.colorScheme)
                 .tint(FuelTheme.green)
+                // Ends the cold-launch signpost once the first scene body has
+                // appeared. `.task` runs once per stable view identity, not on
+                // every re-render, so this is a one-shot lifecycle hook rather
+                // than render-path work; the boolean guard is cheap insurance
+                // against ever closing the same signpost interval twice.
+                .task {
+                    guard !hasEndedColdLaunchSignpost else { return }
+                    hasEndedColdLaunchSignpost = true
+                    FuelSignpost.end(coldLaunchSignpost)
+                }
+                // Spotlight deep link: tapping a search result for an indexed
+                // meal (see `SpotlightIndexer`) hands the app a userActivity of
+                // this well-known type. Route it through the same URL-based
+                // handling used everywhere else rather than a bespoke path.
+                .onContinueUserActivity(CSSearchableItemActionType) { _ in
+                    guard let url = URL(string: "fuel://meals") else { return }
+                    Task { await appState.handle(url) }
+                }
         }
             .modelContainer(container)
     }
@@ -77,7 +107,10 @@ struct AppRootView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             guard phase == .active, state.isConfigured else { return }
-            Task { await state.refresh() }
+            Task {
+                await state.refresh()
+                await state.consumeSharedRoute()
+            }
         }
         .onOpenURL { url in
             Task { await state.handle(url) }

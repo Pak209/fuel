@@ -1,3 +1,4 @@
+import ImageIO
 import PhotosUI
 import SwiftUI
 
@@ -6,10 +7,18 @@ struct ScanView: View {
 
     @State private var selectedPhoto: PhotosPickerItem?
     @State private var imageData: Data?
+    @State private var previewImage: UIImage?
     @State private var phase: ScanPhase = .idle
     @State private var result: FoodRecognitionResult?
     @State private var editorDraft: IdentifiedMealDraft?
     @State private var analysisTask: Task<Void, Never>?
+
+    /// Preview thumbnails are decoded well below the source resolution: the image
+    /// preview renders at a fixed 245pt height, so ~2x that in pixels is already
+    /// more detail than the eye can resolve, and decoding a small CGImage thumbnail
+    /// off the main thread avoids the full-resolution `UIImage(data:)` decode this
+    /// view used to perform synchronously on every body evaluation.
+    private static let previewMaxPixelSize: CGFloat = 490
 
     private enum ScanPhase: Equatable {
         case idle
@@ -38,6 +47,7 @@ struct ScanView: View {
         .navigationBarTitleDisplayMode(.inline)
         .onChange(of: selectedPhoto) { _, item in startAnalysis(item) }
         .onDisappear { analysisTask?.cancel() }
+        .task(id: imageData) { await refreshPreviewImage() }
         .sheet(item: $editorDraft) { identified in
             NavigationStack { MealEditorView(state: state, draft: identified.draft) }
         }
@@ -45,8 +55,8 @@ struct ScanView: View {
 
     private var imagePreview: some View {
         Group {
-            if let imageData, let image = UIImage(data: imageData) {
-                Image(uiImage: image)
+            if let previewImage {
+                Image(uiImage: previewImage)
                     .resizable()
                     .scaledToFill()
                     .frame(height: 245)
@@ -61,6 +71,11 @@ struct ScanView: View {
                         .padding(10)
                         .accessibilityLabel("Remove meal photo")
                     }
+            } else if imageData != nil {
+                ProgressView()
+                    .frame(maxWidth: .infinity)
+                    .frame(height: 245)
+                    .background(FuelTheme.panel, in: RoundedRectangle(cornerRadius: 20))
             } else {
                 VStack(spacing: 12) {
                     Image(systemName: "camera.viewfinder")
@@ -89,6 +104,7 @@ struct ScanView: View {
                 .foregroundStyle(.black)
         }
         .disabled(phase == .preparing || phase == .analyzing)
+        .accessibilityIdentifier("scanPhotoPicker")
     }
 
     @ViewBuilder
@@ -111,12 +127,15 @@ struct ScanView: View {
                     .font(.headline)
                 Text(message).font(.subheadline).foregroundStyle(FuelTheme.secondary)
                 HStack {
-                    Button("Retry", action: retryAnalysis).buttonStyle(.bordered)
+                    Button("Retry", action: retryAnalysis)
+                        .buttonStyle(.bordered)
+                        .accessibilityIdentifier("scanRetryButton")
                     Button("Log manually", action: openManualEditor).buttonStyle(.borderedProminent)
                 }
                 if imageData != nil {
                     Button("Save scan for later") { Task { await saveForLater() } }
                         .buttonStyle(.bordered)
+                        .accessibilityIdentifier("scanSaveForLater")
                 }
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -156,7 +175,9 @@ struct ScanView: View {
                         if job.state == .completed {
                             Button("Review") { Task { await review(job) } }.buttonStyle(.borderedProminent)
                         } else if job.state != .processing {
-                            Button("Retry") { Task { await state.retryPendingRecognition(job) } }.buttonStyle(.bordered)
+                            Button("Retry") { Task { await state.retryPendingRecognition(job) } }
+                                .buttonStyle(.bordered)
+                                .accessibilityIdentifier("scanRetryButton")
                         } else {
                             ProgressView().controlSize(.small)
                         }
@@ -170,6 +191,7 @@ struct ScanView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
             .cardStyle(padding: 14)
+            .accessibilityIdentifier("scanPendingList")
         }
     }
 
@@ -273,7 +295,38 @@ struct ScanView: View {
         cancelAnalysis()
         selectedPhoto = nil
         imageData = nil
+        previewImage = nil
         result = nil
+    }
+
+    /// Regenerates the downsampled preview thumbnail whenever `imageData` changes.
+    /// The decode happens off the main thread via `Task.detached`; only the final
+    /// small `UIImage` is published back to state.
+    private func refreshPreviewImage() async {
+        guard let imageData else {
+            previewImage = nil
+            return
+        }
+        let maxPixelSize = Self.previewMaxPixelSize
+        let decoded = await Task.detached(priority: .userInitiated) {
+            Self.downsampledImage(from: imageData, maxPixelSize: maxPixelSize)
+        }.value
+        guard !Task.isCancelled else { return }
+        previewImage = decoded
+    }
+
+    /// Decodes a small, display-ready thumbnail directly from the image source
+    /// rather than fully decoding the source image and scaling it down, matching
+    /// the pattern used in `OnDeviceFoodRecognitionService.analyze` (FoodServices.swift).
+    nonisolated private static func downsampledImage(from data: Data, maxPixelSize: CGFloat) -> UIImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+            kCGImageSourceCreateThumbnailWithTransform: true
+        ]
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else { return nil }
+        return UIImage(cgImage: cgImage)
     }
 
     private func reviewResult() {

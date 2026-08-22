@@ -251,6 +251,11 @@ struct ProfileEditorView: View {
                 Picker("Activity", selection: $draft.activityLevel) {
                     ForEach(["Sedentary", "Lightly active", "Moderately active", "Very active"], id: \.self) { Text($0).tag($0) }
                 }
+                if draft.goal == .gradualLoss {
+                    Text(SafetyCopy.professionalEscalation)
+                        .font(.caption)
+                        .foregroundStyle(FuelTheme.secondary)
+                }
             }
             Section("Food preferences") {
                 Picker("Diet", selection: $draft.dietaryPreference) { ForEach(DietaryPreference.allCases, id: \.self) { Text($0.rawValue).tag($0) } }
@@ -296,6 +301,7 @@ struct TargetEditorView: View {
     let state: AppState
     @State private var targets: DailyTargets
     @State private var errorMessage: String?
+    @State private var recalculationNote: String?
 
     init(state: AppState) {
         self.state = state
@@ -311,6 +317,11 @@ struct TargetEditorView: View {
                 Stepper("Fat: \(Int(targets.fatGrams)) g", value: $targets.fatGrams, in: 40...200, step: 5)
                 Stepper("Fiber: \(Int(targets.fiberGrams)) g", value: $targets.fiberGrams, in: 20...60)
                 Stepper("Water: \(Int(targets.hydrationMilliliters)) ml", value: $targets.hydrationMilliliters, in: 1_000...4_000, step: 250)
+                if state.profile.goal == .gradualLoss {
+                    Text(SafetyCopy.professionalEscalation)
+                        .font(.caption)
+                        .foregroundStyle(FuelTheme.secondary)
+                }
             }
             Section("Activity and recovery") {
                 Stepper("Steps: \(targets.steps)", value: $targets.steps, in: 1_000...30_000, step: 500)
@@ -318,9 +329,18 @@ struct TargetEditorView: View {
             }
             Section {
                 Button("Recalculate conservative starter targets") {
-                    targets = state.goalCalculationService.calculate(profile: state.profile).targets
+                    // Passing the stored target lets the calculator clamp a large single drop
+                    // and explain the clamp instead of silently applying it.
+                    let result = state.goalCalculationService.calculate(profile: state.profile, previousTargets: state.targets)
+                    targets = result.targets
+                    recalculationNote = result.adjustmentNote
                 }
-                Text("Changes are added to local goal history. This is general wellness planning, not a medical or dietetic prescription.")
+                if let recalculationNote {
+                    Text(recalculationNote)
+                        .font(.caption)
+                        .foregroundStyle(FuelTheme.secondary)
+                }
+                Text("Changes are added to local goal history. \(SafetyCopy.generalWellnessPositioning)")
                     .font(.caption)
                     .foregroundStyle(FuelTheme.secondary)
             }
@@ -394,13 +414,23 @@ struct NotificationPreferencesView: View {
                 Toggle("Goal progress", isOn: $preferences.goalProgressRemindersEnabled)
             }
             Section("Schedule") {
+                ForEach(Array(mealLabels.enumerated()), id: \.offset) { index, label in
+                    Stepper(
+                        "\(label): \(mealReminderHour(at: index)):00",
+                        value: mealReminderHourBinding(at: index),
+                        in: 0...23
+                    )
+                    .accessibilityLabel("\(label) reminder time")
+                }
                 Stepper("Hydration: every \(preferences.hydrationReminderIntervalHours) hours", value: $preferences.hydrationReminderIntervalHours, in: 1...8)
                 Stepper("Daily review: \(preferences.dailyReviewHour):00", value: $preferences.dailyReviewHour, in: 0...23)
-                Picker("Weekly summary", selection: $preferences.weeklySummaryWeekday) {
+                Picker("Weekly summary day", selection: $preferences.weeklySummaryWeekday) {
                     ForEach(Array(Calendar.current.weekdaySymbols.enumerated()), id: \.offset) { index, name in
                         Text(name).tag(index + 1)
                     }
                 }
+                Stepper("Weekly summary time: \(preferences.weeklySummaryHour):00", value: $preferences.weeklySummaryHour, in: 0...23)
+                    .accessibilityLabel("Weekly summary reminder time")
             }
             Section("Quiet hours") {
                 Stepper("Start: \(preferences.quietHoursStart):00", value: $preferences.quietHoursStart, in: 0...23)
@@ -430,6 +460,25 @@ struct NotificationPreferencesView: View {
         .alert("Couldn’t save notification settings", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "Unknown error") }
+    }
+
+    private let mealLabels = ["Breakfast", "Lunch", "Dinner"]
+
+    private func mealReminderHour(at index: Int) -> Int {
+        guard preferences.mealReminderHours.indices.contains(index) else { return 8 }
+        return preferences.mealReminderHours[index]
+    }
+
+    private func mealReminderHourBinding(at index: Int) -> Binding<Int> {
+        Binding(
+            get: { mealReminderHour(at: index) },
+            set: { newValue in
+                var hours = preferences.mealReminderHours
+                while hours.count <= index { hours.append(0) }
+                hours[index] = newValue
+                preferences.mealReminderHours = hours
+            }
+        )
     }
 
     private var authorizationLabel: String {
@@ -508,6 +557,11 @@ private struct PrivacyDataView: View {
                 Text("Exports include profile settings, targets, meals, food items, provenance, and hydration logs. Meal photos are not included.")
                     .font(.caption).foregroundStyle(FuelTheme.secondary)
             }
+            Section("Meal photos") {
+                Toggle("Allow keeping meal photos for recognition improvement", isOn: retentionConsentBinding)
+                Text("Meal photos are saved on this iPhone only. If a reviewed cloud backend is configured for this build and this setting is on, a photo you send for recognition may be kept by that service to improve recognition quality. With this off, photos are never retained beyond the recognition attempt. Either way, photos no meal or pending scan still uses are deleted automatically.")
+                    .font(.caption).foregroundStyle(FuelTheme.secondary)
+            }
             Section("Delete") {
                 Button("Delete all local data", role: .destructive) { confirmsDeletion = true }
                 Text("This permanently deletes local meals, photos, water logs, profile, goals, preferences, caches, favorites, and feedback.")
@@ -522,6 +576,18 @@ private struct PrivacyDataView: View {
         .alert("Data operation failed", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "Unknown error") }
+    }
+
+    private var retentionConsentBinding: Binding<Bool> {
+        Binding(
+            get: { state.preferences.mealPhotoRetentionConsent },
+            set: { newValue in
+                var preferences = state.preferences
+                preferences.mealPhotoRetentionConsent = newValue
+                do { try state.updatePreferences(preferences) }
+                catch { errorMessage = error.localizedDescription }
+            }
+        )
     }
 
     private func prepareExport() {

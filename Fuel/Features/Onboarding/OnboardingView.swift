@@ -3,6 +3,7 @@ import SwiftUI
 struct OnboardingView: View {
     let state: AppState
 
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     @State private var step = 0
     @State private var profile: UserProfile
     @State private var preferences: UserPreferences
@@ -56,22 +57,36 @@ struct OnboardingView: View {
     }
 
     private var controls: some View {
-        HStack(spacing: 12) {
-            if step > 0 {
-                Button("Back") { step -= 1 }
-                    .buttonStyle(.bordered)
+        Group {
+            if dynamicTypeSize.isAccessibilitySize {
+                VStack(spacing: 12) { continueButton; backButton }
+            } else {
+                HStack(spacing: 12) { backButton; continueButton }
             }
-            Button(step == totalSteps - 1 ? (isSaving ? "Saving…" : "Finish") : "Continue") {
-                if step == totalSteps - 1 { finish() }
-                else { advance() }
-            }
-            .buttonStyle(.borderedProminent)
-            .frame(maxWidth: .infinity)
-            .disabled(isSaving || (step == 1 && profile.firstName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
-            .accessibilityIdentifier("onboardingContinue")
         }
         .padding()
         .background(.ultraThinMaterial)
+    }
+
+    @ViewBuilder
+    private var backButton: some View {
+        if step > 0 {
+            Button("Back") { step -= 1 }
+                .buttonStyle(.bordered)
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("onboardingBack")
+        }
+    }
+
+    private var continueButton: some View {
+        Button(step == totalSteps - 1 ? (isSaving ? "Saving…" : "Finish") : "Continue") {
+            if step == totalSteps - 1 { finish() }
+            else { advance() }
+        }
+        .buttonStyle(.borderedProminent)
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .disabled(isSaving || (step == 1 && profile.firstName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
+        .accessibilityIdentifier("onboardingContinue")
     }
 
     @ViewBuilder
@@ -111,7 +126,9 @@ struct OnboardingView: View {
                 try await state.updateTargets(targets, explanation: "Starter targets confirmed during onboarding")
                 try await state.updateNotificationPreferences(preferences)
             } catch {
-                errorMessage = error.localizedDescription
+                let message = error.localizedDescription
+                errorMessage = message
+                AccessibilityNotification.Announcement(message).post()
             }
         }
     }
@@ -194,6 +211,15 @@ private struct GoalStep: View {
                 Text("Fuel uses conservative defaults. Gradual weight goals never create an aggressive deficit, and every target can be changed before saving.")
                     .font(.footnote)
                     .foregroundStyle(FuelTheme.secondary)
+                // Persistent, not conditional: the limitation applies to every goal, and a
+                // note that only appears after a "risky" choice reads as a judgement.
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(SafetyCopy.generalWellnessPositioning)
+                    Text(SafetyCopy.professionalEscalation)
+                }
+                .font(.footnote)
+                .foregroundStyle(FuelTheme.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }

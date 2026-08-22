@@ -321,12 +321,36 @@ struct RulesNutritionRecommendationService: NutritionRecommendationService {
     }
 }
 
+/// Shared safety wording. Kept in one place so onboarding, the profile screens, and the
+/// goal calculator cannot drift into differently-worded limitations.
+enum SafetyCopy {
+    static let generalWellnessPositioning = "Fuel is a general-wellness app. Its targets are editable starting points built from broad estimates, not a medical or dietetic prescription."
+
+    static let professionalEscalation = "If you are pregnant, under 18, managing a medical condition or an eating disorder, or follow a specialized diet, please work with a qualified professional; Fuel’s targets are general guidance only."
+
+    /// Explains a clamped downward adjustment without framing a lower number as an achievement.
+    static func easedCalorieDecrease(from previous: Int, requested: Int, applied: Int) -> String {
+        "Your calorie target was set to \(applied) instead of \(requested), because Fuel changes a daily target by at most \(ConservativeGoalCalculationService.maximumSingleDecreaseKilocalories) calories at a time from your previous \(previous). Gradual changes give your body time to adjust; a qualified professional can help if you want a different pace."
+    }
+}
+
 protocol GoalCalculationService {
-    func calculate(profile: UserProfile) -> GoalCalculationResult
+    func calculate(profile: UserProfile, previousTargets: DailyTargets?) -> GoalCalculationResult
+}
+
+extension GoalCalculationService {
+    /// First-run convenience: no stored target exists yet, so nothing is being adjusted downward.
+    func calculate(profile: UserProfile) -> GoalCalculationResult {
+        calculate(profile: profile, previousTargets: nil)
+    }
 }
 
 struct ConservativeGoalCalculationService: GoalCalculationService {
-    func calculate(profile: UserProfile) -> GoalCalculationResult {
+    /// A recalculation may never cut more than this from the previously stored calorie target.
+    /// Repeated recalculation therefore steps down slowly instead of compounding in one tap.
+    static let maximumSingleDecreaseKilocalories = 300
+
+    func calculate(profile: UserProfile, previousTargets: DailyTargets?) -> GoalCalculationResult {
         let activityFactor: Double = switch profile.activityLevel.lowercased() {
         case let value where value.contains("very"): 1.15
         case let value where value.contains("moderate"): 1.05
@@ -340,7 +364,16 @@ struct ConservativeGoalCalculationService: GoalCalculationService {
         default: 0
         }
         let maintenance = Int((profile.weightKG * 30 * activityFactor).rounded())
-        let calories = min(4_500, max(1_400, maintenance + goalAdjustment))
+        let requestedCalories = min(4_500, max(1_400, maintenance + goalAdjustment))
+        var calories = requestedCalories
+        var clampNote: String?
+        if let previous = previousTargets {
+            let floor = min(4_500, max(1_400, previous.calories - Self.maximumSingleDecreaseKilocalories))
+            if calories < floor {
+                calories = floor
+                clampNote = SafetyCopy.easedCalorieDecrease(from: previous.calories, requested: requestedCalories, applied: calories)
+            }
+        }
         let proteinFactor = profile.goal == .increaseProtein || profile.goal == .athleticPerformance ? 1.6 : 1.2
         let protein = min(250, max(45, profile.weightKG * proteinFactor))
         let fat = max(45, Double(calories) * 0.28 / 9)
@@ -363,7 +396,8 @@ struct ConservativeGoalCalculationService: GoalCalculationService {
                 "Uses a broad weight-based estimate rather than a medical energy prescription.",
                 "Gradual weight goals adjust energy by only 250 calories.",
                 "Public release requires qualified nutrition review."
-            ]
+            ] + [clampNote].compactMap { $0 },
+            adjustmentNote: clampNote
         )
     }
 }

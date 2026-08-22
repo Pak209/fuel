@@ -203,6 +203,64 @@ struct PhotoAnalysisUploadRequest: Codable, Sendable {
     var imageBase64: String
     var mediaType: String
     var retentionConsent: Bool
+
+    /// The only construction path. Taking the whole `UserPreferences` value binds
+    /// `retentionConsent` to the user's stored decision instead of a literal at the call site,
+    /// so a future upload path cannot silently ship an unconsented retention flag. The
+    /// memberwise initializer is deliberately not reinstated.
+    init(imageData: Data, mediaType: String = "image/jpeg", preferences: UserPreferences) throws {
+        guard !imageData.isEmpty else { throw BackendError.invalidPayload }
+        guard imageData.count <= 5_000_000 else { throw BackendError.payloadTooLarge }
+        guard ["image/jpeg", "image/png", "image/heic"].contains(mediaType) else {
+            throw BackendError.invalidPayload
+        }
+        imageBase64 = imageData.base64EncodedString()
+        self.mediaType = mediaType
+        retentionConsent = preferences.mealPhotoRetentionConsent
+    }
+}
+
+/// The account document behind `BackendEndpoint.profile`: the three values Fuel already
+/// mirrors through the sync queue, returned together with the server's revision counter.
+struct ProfileResponse: Codable, Hashable, Sendable {
+    var profile: UserProfile
+    var targets: DailyTargets
+    var preferences: UserPreferences
+    var serverRevision: Int
+    var updatedAt: Date
+}
+
+struct ProfileUpdateRequest: Codable, Hashable, Sendable {
+    var profile: UserProfile
+    var targets: DailyTargets
+    var preferences: UserPreferences
+    var clientRevision: Int
+
+    /// Rejects values Fuel should never put on the wire before the request leaves the device.
+    func validated() throws -> Self {
+        guard clientRevision >= 0 else { throw BackendError.invalidPayload }
+        let name = profile.firstName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 60, profile.ageRange.count <= 32, profile.activityLevel.count <= 40 else {
+            throw BackendError.invalidPayload
+        }
+        guard TimeZone(identifier: profile.timeZoneIdentifier) != nil else { throw BackendError.invalidPayload }
+        guard profile.heightCM.isFinite, (60...260).contains(profile.heightCM),
+              profile.weightKG.isFinite, (20...400).contains(profile.weightKG) else {
+            throw BackendError.invalidPayload
+        }
+        for list in [profile.allergies, profile.foodsToAvoid] {
+            guard list.count <= 40, list.allSatisfy({ !$0.isEmpty && $0.count <= 80 }) else {
+                throw BackendError.invalidPayload
+            }
+        }
+        guard (1_000...6_000).contains(targets.calories),
+              targets.proteinGrams.isFinite, targets.carbohydrateGrams.isFinite,
+              targets.fatGrams.isFinite, targets.fiberGrams.isFinite,
+              targets.hydrationMilliliters.isFinite else {
+            throw BackendError.invalidPayload
+        }
+        return self
+    }
 }
 
 struct RecognitionJobResponse: Codable, Sendable {
@@ -264,6 +322,8 @@ struct RemoteFeatureConfiguration: Codable, Hashable, Sendable {
 protocol BackendServicing: Sendable {
     var isConfigured: Bool { get }
     func authenticate(_ request: AppleAuthenticationRequest, idempotencyKey: String) async throws -> AuthenticationSessionResponse
+    func fetchProfile() async throws -> ProfileResponse
+    func updateProfile(_ request: ProfileUpdateRequest) async throws -> ProfileResponse
     func uploadRecognition(_ request: PhotoAnalysisUploadRequest, idempotencyKey: String) async throws -> RecognitionJobResponse
     func recognitionStatus(jobIdentifier: String) async throws -> RecognitionJobResponse
     func searchNutrition(_ request: NutritionSearchRequest) async throws -> NutritionSearchResponse
@@ -304,8 +364,28 @@ actor BackendAPIClient: BackendServicing {
         try await send(.authenticate, method: "POST", body: request, idempotencyKey: idempotencyKey, authenticated: false)
     }
 
+    func fetchProfile() async throws -> ProfileResponse {
+        let response: ProfileResponse = try await send(.profile, method: "GET", body: EmptyBackendRequest())
+        guard response.serverRevision >= 0,
+              !response.profile.firstName.isEmpty,
+              response.profile.heightCM.isFinite,
+              response.profile.weightKG.isFinite,
+              response.targets.calories > 0 else { throw BackendError.invalidResponse }
+        return response
+    }
+
+    func updateProfile(_ request: ProfileUpdateRequest) async throws -> ProfileResponse {
+        let validated = try request.validated()
+        let payload = try encoder.encode(validated)
+        guard payload.count <= BackendEndpoint.profile.maximumRequestBytes else { throw BackendError.payloadTooLarge }
+        // Derived from the payload so a retried write reuses its key while an edited one gets a new key.
+        let idempotencyKey = SHA256.hash(data: payload).hexString
+        return try await send(.profile, method: "PUT", body: validated, idempotencyKey: idempotencyKey)
+    }
+
     func uploadRecognition(_ request: PhotoAnalysisUploadRequest, idempotencyKey: String) async throws -> RecognitionJobResponse {
-        try await send(.photoAnalysis, method: "POST", body: request, idempotencyKey: idempotencyKey)
+        guard !request.imageBase64.isEmpty else { throw BackendError.invalidPayload }
+        return try await send(.photoAnalysis, method: "POST", body: request, idempotencyKey: idempotencyKey)
     }
 
     func recognitionStatus(jobIdentifier: String) async throws -> RecognitionJobResponse {

@@ -64,10 +64,14 @@ struct MealEditorView: View {
         .navigationTitle(meal == nil ? "Log meal" : "Edit meal")
         .navigationBarTitleDisplayMode(.inline)
         .toolbar {
-            ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+            ToolbarItem(placement: .cancellationAction) {
+                Button("Cancel") { dismiss() }
+                    .accessibilityIdentifier("mealEditorCancel")
+            }
             ToolbarItem(placement: .confirmationAction) {
                 Button(isSaving ? "Saving…" : "Save", action: save)
                     .disabled(isSaving || name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    .accessibilityIdentifier("mealEditorSave")
             }
         }
         .sheet(isPresented: $showsFoodSearch) {
@@ -88,7 +92,7 @@ struct MealEditorView: View {
         .onChange(of: selectedPhoto) { _, newValue in loadPhoto(newValue) }
         .task {
             do { recentItems = try state.recentFoodItems() }
-            catch { errorMessage = error.localizedDescription }
+            catch { fail(error) }
         }
         .confirmationDialog("Delete this meal?", isPresented: $confirmsDelete, titleVisibility: .visible) {
             Button("Delete meal", role: .destructive, action: deleteMeal)
@@ -106,6 +110,7 @@ struct MealEditorView: View {
     private var mealSection: some View {
         Section("Meal") {
             TextField("Meal name", text: $name)
+                .accessibilityIdentifier("mealEditorName")
             Picker("Type", selection: $type) {
                 ForEach(MealType.allCases, id: \.self) { Text($0.rawValue).tag($0) }
             }
@@ -144,15 +149,22 @@ struct MealEditorView: View {
                         if item.isUserCorrected {
                             Image(systemName: "person.crop.circle.badge.checkmark")
                                 .foregroundStyle(FuelTheme.green)
-                                .accessibilityLabel("User corrected")
                         }
                         Image(systemName: "chevron.right").font(.caption).foregroundStyle(.secondary)
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(
+                        "\(item.name), \(item.serving), \(item.nutrition.calories) calories"
+                        + (item.isUserCorrected ? ", user corrected" : "")
+                    )
+                    .accessibilityHint("Double tap to edit this food")
                 }
             }
             .onDelete { items.remove(atOffsets: $0) }
             Button { showsFoodSearch = true } label: { Label("Add food", systemImage: "plus") }
+                .accessibilityIdentifier("mealEditorAddFood")
             Button(action: addManualFood) { Label("Add custom food", systemImage: "square.and.pencil") }
+                .accessibilityIdentifier("mealEditorAddCustomFood")
         } header: {
             Text("Foods")
         } footer: {
@@ -217,12 +229,19 @@ struct MealEditorView: View {
                 .foregroundStyle(.secondary)
             if meal != nil {
                 Button("Delete meal", role: .destructive) { confirmsDelete = true }
+                    .accessibilityIdentifier("mealEditorDelete")
             }
         }
     }
 
     private var errorBinding: Binding<Bool> {
         Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
+    }
+
+    private func fail(_ error: Error) {
+        let message = error.localizedDescription
+        errorMessage = message
+        AccessibilityNotification.Announcement(message).post()
     }
 
     private func addFood(_ food: FoodSearchResult) {
@@ -273,7 +292,7 @@ struct MealEditorView: View {
                 imageData = try await state.imageProcessor.prepareForRecognition(data)
                 removeExistingImage = false
             } catch {
-                errorMessage = error.localizedDescription
+                fail(error)
             }
         }
     }
@@ -300,7 +319,7 @@ struct MealEditorView: View {
                 else { try await state.saveMeal(draft) }
                 dismiss()
             } catch {
-                errorMessage = error.localizedDescription
+                fail(error)
             }
         }
     }
@@ -311,7 +330,7 @@ struct MealEditorView: View {
         Task {
             defer { isSaving = false }
             do { try await state.deleteMeal(meal); dismiss() }
-            catch { errorMessage = error.localizedDescription }
+            catch { fail(error) }
         }
     }
 }

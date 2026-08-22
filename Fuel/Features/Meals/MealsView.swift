@@ -66,8 +66,11 @@ struct MealsView: View {
         .toolbar {
             ToolbarItemGroup(placement: .topBarTrailing) {
                 Button { showsCalendar = true } label: { Image(systemName: "calendar") }
+                    .accessibilityLabel("Choose a day to view")
+                    .accessibilityIdentifier("mealsCalendarButton")
                 Button { showsNewMeal = true } label: { Image(systemName: "plus") }
                     .accessibilityLabel("Log meal manually")
+                    .accessibilityIdentifier("mealsAddButton")
             }
         }
         .sheet(isPresented: $showsNewMeal) {
@@ -128,10 +131,14 @@ struct MealsView: View {
                     Button(value.title) { filter = value }
                         .buttonStyle(.bordered)
                         .tint(filter == value ? FuelTheme.green : FuelTheme.secondary)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityAddTraits(filter == value ? .isSelected : [])
                 }
             }
             .padding(.horizontal)
         }
+        .accessibilityIdentifier("mealsFilterMenu")
     }
 
     private var favorites: some View {
@@ -153,6 +160,9 @@ struct MealsView: View {
                                 .background(FuelTheme.panelRaised, in: Capsule())
                         }
                         .buttonStyle(.plain)
+                        .frame(minHeight: 44)
+                        .contentShape(Rectangle())
+                        .accessibilityLabel("Log favorite meal, \(template.name)")
                         .contextMenu {
                             Button(role: .destructive) { pendingFavoriteDelete = template } label: {
                                 Label("Remove favorite", systemImage: "star.slash")
@@ -201,6 +211,7 @@ struct MealsView: View {
             }
             .listStyle(.insetGrouped)
             .scrollContentBackground(.hidden)
+            .accessibilityIdentifier("mealsList")
         }
     }
 
@@ -208,23 +219,29 @@ struct MealsView: View {
         Binding(get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } })
     }
 
+    private func fail(_ error: Error) {
+        let message = error.localizedDescription
+        errorMessage = message
+        AccessibilityNotification.Announcement(message).post()
+    }
+
     private func duplicate(_ meal: Meal) {
         Task {
             do { try await state.duplicateMeal(meal) }
-            catch { errorMessage = error.localizedDescription }
+            catch { fail(error) }
         }
     }
 
     private func favorite(_ meal: Meal) {
         do { try state.saveFavorite(from: meal) }
-        catch { errorMessage = error.localizedDescription }
+        catch { fail(error) }
     }
 
     private func removeFavorite() {
         guard let favorite = pendingFavoriteDelete else { return }
         pendingFavoriteDelete = nil
         do { try state.deleteFavorite(id: favorite.id) }
-        catch { errorMessage = error.localizedDescription }
+        catch { fail(error) }
     }
 
     private func confirmDelete() {
@@ -234,8 +251,9 @@ struct MealsView: View {
             do {
                 try await state.deleteMeal(meal)
                 lastDeleted = meal
+                AccessibilityNotification.Announcement("\(meal.name) deleted").post()
             } catch {
-                errorMessage = error.localizedDescription
+                fail(error)
             }
         }
     }
@@ -246,8 +264,9 @@ struct MealsView: View {
             do {
                 try await state.restoreMeal(meal)
                 lastDeleted = nil
+                AccessibilityNotification.Announcement("\(meal.name) restored").post()
             } catch {
-                errorMessage = error.localizedDescription
+                fail(error)
             }
         }
     }
@@ -271,31 +290,54 @@ private enum MealHistoryFilter: String, CaseIterable, Identifiable {
 
 private struct MealHistoryRow: View {
     let meal: Meal
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     var body: some View {
         HStack(spacing: 11) {
             MealPhotoThumbnail(fileName: meal.imageFileName, fallback: icon)
-            VStack(alignment: .leading, spacing: 3) {
-                HStack(spacing: 5) {
-                    Text(meal.name).font(.headline).lineLimit(1)
-                    if meal.status == .planned {
-                        Text("Planned").font(.caption2.bold()).foregroundStyle(FuelTheme.orange)
-                    }
-                }
-                Text("\(meal.type.rawValue) · \(meal.date.formatted(date: .omitted, time: .shortened))")
-                    .font(.caption)
-                    .foregroundStyle(FuelTheme.secondary)
-                Text("\(meal.calories) cal · \(Int(meal.protein))g protein")
-                    .font(.caption)
-                    .foregroundStyle(FuelTheme.secondary)
-                Text(meal.items.prefix(3).map(\.name).joined(separator: " • "))
-                    .font(.caption2)
-                    .foregroundStyle(FuelTheme.secondary)
-                    .lineLimit(1)
+            if dynamicTypeSize.isAccessibilitySize {
+                detail(truncating: false)
+            } else {
+                detail(truncating: true)
             }
             Spacer(minLength: 6)
         }
         .padding(.vertical, 3)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(combinedLabel)
+    }
+
+    private func detail(truncating: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 5) {
+                Text(meal.name).font(.headline).lineLimit(truncating ? 1 : nil)
+                if meal.status == .planned {
+                    Text("Planned").font(.caption2.bold()).foregroundStyle(FuelTheme.orange)
+                }
+            }
+            Text("\(meal.type.rawValue) · \(meal.date.formatted(date: .omitted, time: .shortened))")
+                .font(.caption)
+                .foregroundStyle(FuelTheme.secondary)
+            Text("\(meal.calories) cal · \(Int(meal.protein))g protein")
+                .font(.caption)
+                .foregroundStyle(FuelTheme.secondary)
+            if !meal.items.isEmpty {
+                Text(meal.items.prefix(3).map(\.name).joined(separator: " • "))
+                    .font(.caption2)
+                    .foregroundStyle(FuelTheme.secondary)
+                    .lineLimit(truncating ? 1 : nil)
+            }
+        }
+    }
+
+    private var combinedLabel: String {
+        var parts = [meal.name]
+        if meal.status == .planned { parts.append("Planned") }
+        parts.append("\(meal.type.rawValue) at \(meal.date.formatted(date: .omitted, time: .shortened))")
+        parts.append("\(meal.calories) calories, \(Int(meal.protein)) grams protein")
+        let items = meal.items.prefix(3).map(\.name).joined(separator: ", ")
+        if !items.isEmpty { parts.append("Includes \(items)") }
+        return parts.joined(separator: ". ")
     }
 
     private var icon: String { meal.type == .breakfast ? "sun.max.fill" : "fork.knife" }

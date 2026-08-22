@@ -67,6 +67,16 @@ struct DailySummaryService {
 
 @MainActor
 final class DailyDataCoordinator {
+    /// Retry budget shared by the pending-recognition queue and the sync queue.
+    /// Once `attempts` reaches this value the record stops being offered for automatic
+    /// retry; `lastError` is preserved so the UI can surface why it stopped.
+    static let maxRetryAttempts = 8
+
+    /// Grace period before an unreferenced meal photo is deleted. Long enough that an
+    /// in-flight save or a just-undone deletion is never caught, short enough that photos
+    /// do not outlive the records that justified keeping them.
+    nonisolated static let orphanedPhotoRetention: TimeInterval = 7 * 24 * 60 * 60
+
     private let logger = Logger(subsystem: "com.pak.fuel", category: "DailyDataCoordinator")
     private let repositories: LocalRepositoryContainer
     private let summaryService: DailySummaryService
@@ -116,7 +126,7 @@ final class DailyDataCoordinator {
             do {
                 try repositories.summaryCache.save(snapshot, dayKey: dayKey, sourceRevision: sourceRevision(meals: meals, hydration: hydration))
             } catch {
-                logger.error("Daily summary cache save failed: \(error.localizedDescription, privacy: .public)")
+                logger.error("Daily summary cache save failed: \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
             }
             return snapshot
         } catch {
@@ -126,7 +136,7 @@ final class DailyDataCoordinator {
                     return cached
                 }
             } catch let cacheError {
-                logger.error("Daily summary cache read failed: \(cacheError.localizedDescription, privacy: .public)")
+                logger.error("Daily summary cache read failed: \(String(describing: type(of: cacheError)), privacy: .public) \(cacheError.localizedDescription, privacy: .private)")
             }
             throw error
         }
@@ -297,7 +307,9 @@ final class DailyDataCoordinator {
     @discardableResult
     func consumeHydrationCommand(_ command: PendingHydrationCommand, timeZoneIdentifier: String) throws -> Bool {
         let interval = boundaryService.interval(containing: command.createdAt, timeZoneIdentifier: timeZoneIdentifier)
-        return try repositories.consumeHydrationCommand(command, dayKey: boundaryService.cacheKey(for: interval))
+        guard let entry = try repositories.consumeHydrationCommand(command, dayKey: boundaryService.cacheKey(for: interval)) else { return false }
+        enqueueSyncBestEffort(entityType: "hydration", identifier: entry.id.uuidString, operation: .create, value: exportedHydration(entry), revisionDate: entry.createdAt)
+        return true
     }
 
     func pendingRecognitionJobs() throws -> [PendingRecognitionRecord] {
@@ -321,10 +333,21 @@ final class DailyDataCoordinator {
         try await LocalMealPhotoStore().load(fileName: record.photoFileName)
     }
 
+    /// `attempts` is incremented in exactly one place per queue: when an attempt *fails*
+    /// (`markRecognitionFailed` / `markSyncFailed`). Starting work never increments, so a
+    /// process kill mid-attempt cannot inflate the retry budget.
     func markRecognitionProcessing(_ record: PendingRecognitionRecord) throws {
         record.state = .processing
-        record.attempts += 1
         record.lastError = nil
+        try repositories.pendingRecognition.save(record)
+    }
+
+    /// Manual (user-initiated) retry: clears the retry budget so an exhausted record
+    /// can re-enter the automatic queue.
+    func resetRecognitionForRetry(_ record: PendingRecognitionRecord) throws {
+        record.state = .pending
+        record.attempts = 0
+        record.nextAttemptAt = nil
         try repositories.pendingRecognition.save(record)
     }
 
@@ -338,10 +361,71 @@ final class DailyDataCoordinator {
 
     func markRecognitionFailed(_ record: PendingRecognitionRecord, error: Error, now: Date = .now) throws {
         record.state = .failed
+        record.attempts += 1
         record.lastError = String(error.localizedDescription.prefix(240))
-        let delay = min(pow(2, Double(max(record.attempts, 1))) * 30, 6 * 60 * 60)
-        record.nextAttemptAt = now.addingTimeInterval(delay)
+        if record.attempts >= Self.maxRetryAttempts {
+            // Terminal: excluded from automatic retry until the user retries manually.
+            record.nextAttemptAt = nil
+        } else {
+            let delay = min(pow(2, Double(max(record.attempts, 1))) * 30, 6 * 60 * 60)
+            record.nextAttemptAt = now.addingTimeInterval(delay)
+        }
         try repositories.pendingRecognition.save(record)
+    }
+
+    func isRetryExhausted(_ record: PendingRecognitionRecord) -> Bool {
+        record.attempts >= Self.maxRetryAttempts
+    }
+
+    /// Resets work interrupted by a process kill so it re-enters its queue.
+    /// Retry metadata (`attempts`, `lastError`) is preserved.
+    func reconcileInterruptedWork() throws {
+        for record in try repositories.pendingRecognition.all() where record.state == .processing {
+            record.state = .pending
+            record.nextAttemptAt = nil
+            try repositories.pendingRecognition.save(record)
+        }
+        for operation in try repositories.syncQueue.all() where operation.state == .uploading {
+            operation.state = .pending
+            operation.nextAttemptAt = nil
+            try repositories.syncQueue.save(operation)
+        }
+        // Retention sweep. The reference set is read here, synchronously, while the model
+        // context is known to be alive; the async part below only touches the filesystem, so
+        // it can safely outlive this call and can never fail the queue reconciliation.
+        var referenced = Set(try repositories.meals.allMeals().compactMap(\.imageFileName))
+        referenced.formUnion(try repositories.pendingRecognition.all().map(\.photoFileName))
+        let names = referenced
+        let logger = logger
+        Task {
+            do {
+                let removed = try await Self.purgeOrphanedPhotos(in: LocalMealPhotoStore(), referencedFileNames: names)
+                if !removed.isEmpty {
+                    logger.info("Purged \(removed.count, privacy: .public) orphaned meal photo(s)")
+                }
+            } catch {
+                logger.error("Orphaned photo purge failed: \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
+            }
+        }
+    }
+
+    /// Deletes photos no meal and no queued recognition still points at, returning the file
+    /// names it removed. A photo whose meal was soft-deleted becomes unreferenced immediately
+    /// but survives `retention` first, so undo keeps working.
+    @discardableResult
+    nonisolated static func purgeOrphanedPhotos(
+        in store: any MealPhotoStore,
+        referencedFileNames: Set<String>,
+        retention: TimeInterval = orphanedPhotoRetention,
+        now: Date = .now
+    ) async throws -> [String] {
+        var removed: [String] = []
+        for photo in try await store.storedPhotos() where !referencedFileNames.contains(photo.fileName) {
+            guard now.timeIntervalSince(photo.modifiedAt) >= retention else { continue }
+            try await store.delete(fileName: photo.fileName)
+            removed.append(photo.fileName)
+        }
+        return removed
     }
 
     func deletePendingRecognition(_ record: PendingRecognitionRecord) async throws {
@@ -398,22 +482,26 @@ final class DailyDataCoordinator {
     }
 
     func readySyncOperations(at date: Date = .now) throws -> [SyncOperationRecord] {
-        try repositories.syncQueue.ready(at: date)
+        try repositories.syncQueue.ready(at: date).filter { $0.attempts < Self.maxRetryAttempts }
     }
 
     func allSyncOperations() throws -> [SyncOperationRecord] { try repositories.syncQueue.all() }
 
     func markSyncUploading(_ operation: SyncOperationRecord) throws {
         operation.state = .uploading
-        operation.attempts += 1
         operation.lastError = nil
         try repositories.syncQueue.save(operation)
     }
 
     func markSyncFailed(_ operation: SyncOperationRecord, error: Error, now: Date = .now) throws {
         operation.state = .failed
+        operation.attempts += 1
         operation.lastError = String(error.localizedDescription.prefix(240))
-        operation.nextAttemptAt = now.addingTimeInterval(min(pow(2, Double(max(operation.attempts, 1))) * 30, 6 * 60 * 60))
+        if operation.attempts >= Self.maxRetryAttempts {
+            operation.nextAttemptAt = nil
+        } else {
+            operation.nextAttemptAt = now.addingTimeInterval(min(pow(2, Double(max(operation.attempts, 1))) * 30, 6 * 60 * 60))
+        }
         try repositories.syncQueue.save(operation)
     }
 
@@ -522,7 +610,7 @@ final class DailyDataCoordinator {
                 ))
             }
         } catch {
-            logger.error("Sync enqueue failed entity=\(entityType, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
+            logger.error("Sync enqueue failed entity=\(entityType, privacy: .public) error=\(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -534,7 +622,7 @@ final class DailyDataCoordinator {
         do {
             try await LocalMealPhotoStore().delete(fileName: fileName)
         } catch {
-            logger.error("Photo cleanup failed during \(reason, privacy: .public): \(error.localizedDescription, privacy: .public)")
+            logger.error("Photo cleanup failed during \(reason, privacy: .public): \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
         }
     }
 }

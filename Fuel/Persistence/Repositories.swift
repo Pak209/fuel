@@ -575,18 +575,19 @@ struct LocalRepositoryContainer {
     }
 
     @discardableResult
-    func consumeHydrationCommand(_ command: PendingHydrationCommand, dayKey: String) throws -> Bool {
+    func consumeHydrationCommand(_ command: PendingHydrationCommand, dayKey: String) throws -> HydrationEntry? {
         let commandID = command.id
         if try context.fetch(FetchDescriptor<ProcessedExternalCommandRecord>(
             predicate: #Predicate { $0.id == commandID }
         )).first != nil {
-            return false
+            return nil
         }
-        context.insert(HydrationEntry(
+        let entry = HydrationEntry(
             date: command.createdAt,
             amountMilliliters: Double(command.amountMilliliters),
             provenance: .imported
-        ))
+        )
+        context.insert(entry)
         context.insert(ProcessedExternalCommandRecord(id: command.id, kind: "hydration"))
         let cacheKey = dayKey
         let caches = try context.fetch(FetchDescriptor<DailySummaryCacheRecord>(
@@ -595,7 +596,7 @@ struct LocalRepositoryContainer {
         caches.forEach(context.delete)
         do {
             try context.save()
-            return true
+            return entry
         } catch {
             throw LocalDataError.persistenceFailed(error.localizedDescription)
         }

@@ -155,7 +155,9 @@ struct HydrationLogView: View {
         List {
             Section("Add water") {
                 Stepper("\(Int(amount)) ml", value: $amount, in: 100...1_500, step: 50)
-                Button("Add water") { Task { await add() } }.buttonStyle(.borderedProminent)
+                Button("Add water") { Task { await add() } }
+                    .buttonStyle(.borderedProminent)
+                    .accessibilityIdentifier("hydrationAddButton")
             }
             Section("Entries") {
                 if entries.isEmpty { Text("No water logged for this day.").foregroundStyle(FuelTheme.secondary) }
@@ -203,7 +205,7 @@ struct HydrationLogView: View {
 
     private func load() {
         do { entries = try state.hydrationEntriesForSelectedDay() }
-        catch { errorMessage = error.localizedDescription }
+        catch { fail(error) }
     }
 
     private func add() async {
@@ -211,7 +213,8 @@ struct HydrationLogView: View {
             let date = Calendar.autoupdatingCurrent.isDateInToday(state.selectedDate) ? Date.now : state.selectedDate.addingTimeInterval(12 * 60 * 60)
             try await state.addWater(milliliters: amount, at: date)
             load()
-        } catch { errorMessage = error.localizedDescription }
+            AccessibilityNotification.Announcement("Added \(Int(amount)) milliliters of water").post()
+        } catch { fail(error) }
     }
 
     private func deletePendingEntry() async {
@@ -220,7 +223,13 @@ struct HydrationLogView: View {
         do {
             try await state.deleteHydration(entry)
             load()
-        } catch { errorMessage = error.localizedDescription }
+        } catch { fail(error) }
+    }
+
+    private func fail(_ error: Error) {
+        let message = error.localizedDescription
+        errorMessage = message
+        AccessibilityNotification.Announcement(message).post()
     }
 }
 

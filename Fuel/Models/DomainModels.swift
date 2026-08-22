@@ -223,6 +223,9 @@ struct UserPreferences: Codable, Hashable {
     var weeklySummaryHour = 18
     var quietHoursStart = 21
     var quietHoursEnd = 7
+    /// Opt-in, default off. Meal photos always stay on this device; this only allows a
+    /// configured backend to keep an uploaded photo to improve recognition quality.
+    var mealPhotoRetentionConsent = false
 
     var hasEnabledReminders: Bool {
         mealRemindersEnabled
@@ -238,6 +241,7 @@ struct UserPreferences: Codable, Hashable {
         case weeklySummaryEnabled, healthConnectionAlertsEnabled, goalProgressRemindersEnabled
         case mealReminderHours, hydrationReminderIntervalHours, dailyReviewHour
         case weeklySummaryWeekday, weeklySummaryHour, quietHoursStart, quietHoursEnd
+        case mealPhotoRetentionConsent
     }
 
     init() {}
@@ -260,6 +264,7 @@ struct UserPreferences: Codable, Hashable {
         weeklySummaryHour = try values.decodeIfPresent(Int.self, forKey: .weeklySummaryHour) ?? 18
         quietHoursStart = try values.decodeIfPresent(Int.self, forKey: .quietHoursStart) ?? 21
         quietHoursEnd = try values.decodeIfPresent(Int.self, forKey: .quietHoursEnd) ?? 7
+        mealPhotoRetentionConsent = try values.decodeIfPresent(Bool.self, forKey: .mealPhotoRetentionConsent) ?? false
     }
 }
 
@@ -432,6 +437,9 @@ struct GoalCalculationResult: Hashable {
     var targets: DailyTargets
     var explanation: String
     var assumptions: [String]
+    /// Set when the calculator had to soften an adjustment (rather than apply it as computed).
+    /// Also present in `assumptions`; surfaced separately so UI can show it next to the control.
+    var adjustmentNote: String? = nil
 }
 
 // MARK: - SwiftData records
@@ -673,6 +681,9 @@ final class DailySummaryCacheRecord {
 @Model
 final class UserPreferencesRecord {
     @Attribute(.unique) var key: String
+    /// Every `UserPreferences` field, including `mealPhotoRetentionConsent`, lives in this blob.
+    /// Adding a field is therefore schema-neutral: no column, no version bump, and a payload
+    /// written before the field existed decodes it as `false` via `decodeIfPresent`.
     var payloadData: Data
     var updatedAt: Date
 
@@ -932,6 +943,18 @@ enum FuelSchemaV3: VersionedSchema {
     }
 }
 
+// NOTE: `mealPhotoRetentionConsent` deliberately did NOT get a V4 schema version.
+//
+// Every version above lists the same live `@Model` types, so a V4 whose `models` array
+// equals V3's produces an identical entity checksum, and `ModelContainer(migrationPlan:)`
+// aborts with an uncatchable `NSInvalidArgumentException: Duplicate version checksums
+// detected` — the app hard-crashes in `FuelApp.init`, before its `do/catch` fallback.
+//
+// The documented fix is to snapshot the old `UserPreferencesRecord` shape inside
+// `FuelSchemaV3` so V3 and V4 differ. That requires `FuelApp.swift` to open its container
+// at V4 (it pins `FuelSchemaV3`), because a snapshotted V3 no longer registers the live
+// class that `Repositories.swift` fetches. Until the app entry point moves to V4, storing
+// the flag in `payloadData` keeps the change schema-neutral and needs no migration at all.
 enum FuelMigrationPlan: SchemaMigrationPlan {
     static var schemas: [any VersionedSchema.Type] { [FuelSchemaV1.self, FuelSchemaV2.self, FuelSchemaV3.self] }
     static var stages: [MigrationStage] {
