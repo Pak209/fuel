@@ -8,6 +8,8 @@
 	<string>$(FUEL_BACKEND_BASE_URL)</string>
 	<key>UILaunchScreen</key>
 	<dict/>
+	<key>NSHealthUpdateUsageDescription</key>
+	<string>Fuel does not write data to Apple Health. Your nutrition and hydration logs stay in Fuel unless you export them yourself.</string>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>CFBundleURLTypes</key>
