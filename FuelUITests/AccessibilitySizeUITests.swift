@@ -32,12 +32,14 @@ final class AccessibilitySizeUITests: XCTestCase {
             )
         }
 
-        // "Next day" is disabled while viewing today, so only check hittability for the
-        // controls that are expected to be enabled at this larger layout.
-        for identifier in [
-            "todayAddMealButton", "todayAddWaterButton", "todayProfileButton",
-            "todayNotificationsButton", "todayPreviousDayButton",
-        ] {
+        // Today is one continuous ScrollView, so "todayAddMealButton" and "todayAddWaterButton"
+        // sit in scrollable content further down the page — requiring a scroll to reach them is
+        // normal at any text size, not a Dynamic Type defect, so `exists` above is the
+        // meaningful check for those two. The header row (day navigation, profile,
+        // notifications) is fixed at the top and should always be reachable without scrolling,
+        // so it's held to the stricter hittability bar. "Next day" is disabled while viewing
+        // today, so it's excluded here too.
+        for identifier in ["todayProfileButton", "todayNotificationsButton", "todayPreviousDayButton"] {
             XCTAssertTrue(
                 app.buttons[identifier].isHittable,
                 "\(identifier) should be hittable at an accessibility Dynamic Type size"

@@ -59,10 +59,17 @@ enum UITestSupport {
     }
 
     /// Clears an existing value in a text field and types new text into it.
+    ///
+    /// A plain `tap()` on a field with existing content does not reliably place the cursor at
+    /// the end — it can land mid-string — so backspacing exactly `stringValue.count` times can
+    /// leave a leftover tail sitting in front of the cursor (the iOS software keyboard also has
+    /// no arrow keys, so nudging the cursor via `typeText` doesn't work either). Tapping near
+    /// the field's trailing edge instead reliably places the cursor at the end of the existing
+    /// text, so the backspaces that follow clear the whole thing.
     static func clearAndType(_ field: XCUIElement, text: String) {
-        field.tap()
+        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
         if let stringValue = field.value as? String, !stringValue.isEmpty {
-            let deleteString = String(repeating: XCUIKeyboardKey.delete.rawValue, count: stringValue.count)
+            let deleteString = String(repeating: XCUIKeyboardKey.delete.rawValue, count: stringValue.count + 5)
             field.typeText(deleteString)
         }
         field.typeText(text)
@@ -76,5 +83,20 @@ enum UITestSupport {
         app.descendants(matching: .any)
             .matching(NSPredicate(format: "label CONTAINS[cd] %@", text))
             .firstMatch
+    }
+
+    /// Taps an element that is visually tappable but that XCUITest reports as non-hittable.
+    ///
+    /// On iOS 26, horizontal `ScrollView`s carry full-size scroll-edge-effect layers
+    /// (`AdditionalDimmingOverlay` etc.) as accessibility elements stacked above their
+    /// content, so hit-testing a chip inside one resolves to the overlay and `tap()` fails
+    /// even though a real finger tap works. A coordinate tap targets the element's frame
+    /// directly and bypasses the hittability resolution.
+    static func tapAllowingOverlay(_ element: XCUIElement) {
+        if element.isHittable {
+            element.tap()
+        } else {
+            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        }
     }
 }

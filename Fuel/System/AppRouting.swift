@@ -51,8 +51,8 @@ final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUse
             UIApplicationShortcutItem(
                 type: "com.pak.fuel.scan",
                 localizedTitle: "Scan a meal",
-                localizedSubtitle: "Open the meal camera",
-                icon: UIApplicationShortcutIcon(systemImageName: "camera.viewfinder")
+                localizedSubtitle: "Choose a meal photo",
+                icon: UIApplicationShortcutIcon(systemImageName: "photo.on.rectangle")
             )
         ]
         return true

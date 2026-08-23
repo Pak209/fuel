@@ -68,6 +68,8 @@ struct ScanView: View {
                                 .padding(10)
                                 .background(.black.opacity(0.7), in: Circle())
                         }
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
                         .padding(10)
                         .accessibilityLabel("Remove meal photo")
                     }
@@ -78,7 +80,7 @@ struct ScanView: View {
                     .background(FuelTheme.panel, in: RoundedRectangle(cornerRadius: 20))
             } else {
                 VStack(spacing: 12) {
-                    Image(systemName: "camera.viewfinder")
+                    Image(systemName: "photo.on.rectangle.angled")
                         .font(.system(size: 48, weight: .light))
                         .foregroundStyle(FuelTheme.green)
                     Text("Choose a clear overhead or angled meal photo")

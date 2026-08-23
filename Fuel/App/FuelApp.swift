@@ -1,5 +1,6 @@
 import SwiftUI
 import SwiftData
+import CoreData
 import CoreSpotlight
 
 @main
@@ -35,7 +36,18 @@ struct FuelApp: App {
         }
         #endif
         do {
-            container = try ModelContainer(for: schema, migrationPlan: FuelMigrationPlan.self)
+            // Two guards, both routed through `ObjCExceptionCatcher`, because a
+            // damaged store makes Core Data *raise* rather than throw and Swift
+            // `catch` never sees it (the app then crash-loops instead of
+            // reaching `StartupFailureView`). First read the existing store's
+            // metadata; then build the container — the crash was observed
+            // inside container construction, so both need the net.
+            if let reason = StoreHealth.openFailureReason(forStoreAt: StoreHealth.defaultStoreURL(for: schema)) {
+                throw StoreHealth.OpenFailure(message: reason)
+            }
+            container = try StoreHealth.catchingObjCExceptions {
+                try ModelContainer(for: schema, migrationPlan: FuelMigrationPlan.self)
+            }
             startupError = nil
         } catch {
             startupError = error.localizedDescription
@@ -76,6 +88,65 @@ struct FuelApp: App {
                 }
         }
             .modelContainer(container)
+    }
+}
+
+/// Startup checks for the on-disk SwiftData store.
+///
+/// SwiftData opens its store through `NSPersistentStoreCoordinator`, which
+/// reports some unrecoverable conditions (a truncated or non-SQLite file, an
+/// unreadable store) by raising an `NSException`. Swift cannot catch those, so
+/// the process aborts before the `do`/`catch` in `FuelApp.init` can fall back
+/// to an in-memory container. Everything here funnels the dangerous calls
+/// through `ObjCExceptionCatcher` so both failure shapes — raised exception and
+/// thrown `NSError` — arrive as ordinary Swift errors.
+///
+/// Nothing here deletes or moves the user's store: a failure surfaces in
+/// `StartupFailureView`, which is where recovery choices belong.
+enum StoreHealth {
+    /// Where SwiftData will actually put the default on-disk store.
+    ///
+    /// Asking `ModelConfiguration` rather than hardcoding
+    /// `URL.applicationSupportDirectory/default.store`: because Fuel ships an
+    /// app group (shared with the widgets), SwiftData resolves the default
+    /// store into the *group* container, so the app-support guess points at a
+    /// file that never exists and the check would silently never fire.
+    static func defaultStoreURL(for schema: Schema) -> URL {
+        ModelConfiguration(schema: schema).url
+    }
+
+    /// A failure carrying an already user-readable message.
+    struct OpenFailure: LocalizedError {
+        let message: String
+        var errorDescription: String? { message }
+    }
+
+    /// Runs `body`, converting a raised `NSException` into a thrown Swift error.
+    static func catchingObjCExceptions<T>(_ body: () throws -> T) throws -> T {
+        var outcome: Result<T, Error>?
+        try ObjCExceptionCatcher.catchException {
+            outcome = Result { try body() }
+        }
+        guard let outcome else {
+            throw OpenFailure(message: "The data store could not be opened.")
+        }
+        return try outcome.get()
+    }
+
+    /// Reads the store's metadata to find out whether it can be opened at all.
+    ///
+    /// - Returns: `nil` when there is no store yet or the store reads cleanly;
+    ///   otherwise a user-readable description of the failure.
+    static func openFailureReason(forStoreAt url: URL) -> String? {
+        guard FileManager.default.fileExists(atPath: url.path(percentEncoded: false)) else { return nil }
+        do {
+            try catchingObjCExceptions {
+                _ = try NSPersistentStoreCoordinator.metadataForPersistentStore(type: .sqlite, at: url)
+            }
+            return nil
+        } catch {
+            return error.localizedDescription
+        }
     }
 }
 

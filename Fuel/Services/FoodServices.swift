@@ -92,25 +92,166 @@ struct LocalFoodDatabaseService: FoodDatabaseService {
     }
 }
 
-struct OpenFoodFactsService: FoodDatabaseService {
+/// Monotonic time source for `FoodSearchCache`/`FoodSearchRateLimiter` so tests
+/// can control TTL expiry and rate-limit windows deterministically instead of
+/// sleeping for real minutes.
+protocol FoodSearchClock: Sendable {
+    func now() -> Date
+}
+
+struct SystemFoodSearchClock: FoodSearchClock {
+    func now() -> Date { .now }
+}
+
+/// Transport seam for `OpenFoodFactsService`, mirroring `BackendTransport`
+/// (`BackendServices.swift`) so tests can substitute a recording/scripted
+/// double instead of performing real network I/O.
+protocol FoodSearchTransport: Sendable {
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse)
+}
+
+struct URLSessionFoodSearchTransport: FoodSearchTransport {
     var session: URLSession = .shared
 
+    func data(for request: URLRequest) async throws -> (Data, HTTPURLResponse) {
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse else { throw FoodServiceError.invalidResponse }
+        return (data, http)
+    }
+}
+
+/// Small in-memory cache of recent Open Food Facts queries (normalized
+/// lowercase/trimmed key). Keeps repeated/duplicate searches (retyping,
+/// debounce edge cases, revisiting a query) from re-hitting the network within
+/// the TTL window. An actor because it's shared, mutable state accessed from
+/// concurrent search calls.
+actor FoodSearchCache {
+    private struct Entry {
+        var results: [FoodSearchResult]
+        var expiresAt: Date
+    }
+
+    private var entriesByKey: [String: Entry] = [:]
+    private var insertionOrder: [String] = []
+    private let capacity: Int
+    private let ttl: TimeInterval
+    private let clock: any FoodSearchClock
+
+    init(capacity: Int = 100, ttl: TimeInterval = 300, clock: any FoodSearchClock = SystemFoodSearchClock()) {
+        self.capacity = capacity
+        self.ttl = ttl
+        self.clock = clock
+    }
+
+    static func normalizedKey(_ query: String) -> String {
+        query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    /// A live (non-expired) cached value, or `nil` on miss/expiry.
+    func results(for key: String) -> [FoodSearchResult]? {
+        guard let entry = entriesByKey[key] else { return nil }
+        guard entry.expiresAt > clock.now() else {
+            remove(key)
+            return nil
+        }
+        return entry.results
+    }
+
+    /// The last known value for `key` even if expired, used to degrade
+    /// gracefully when the rate limiter is exhausted rather than erroring.
+    func staleResults(for key: String) -> [FoodSearchResult]? {
+        entriesByKey[key]?.results
+    }
+
+    func store(_ results: [FoodSearchResult], for key: String) {
+        if entriesByKey[key] == nil {
+            insertionOrder.append(key)
+        }
+        entriesByKey[key] = Entry(results: results, expiresAt: clock.now().addingTimeInterval(ttl))
+        while insertionOrder.count > capacity {
+            let oldest = insertionOrder.removeFirst()
+            entriesByKey.removeValue(forKey: oldest)
+        }
+    }
+
+    private func remove(_ key: String) {
+        entriesByKey.removeValue(forKey: key)
+        insertionOrder.removeAll { $0 == key }
+    }
+}
+
+/// Token-bucket limiter capping remote Open Food Facts searches at
+/// `maximumTokens` per `refillInterval` (default 8/min, under OFF's documented
+/// 10/min). An actor so concurrent callers see a consistent token count.
+actor FoodSearchRateLimiter {
+    private let maximumTokens: Double
+    private let refillInterval: TimeInterval
+    private var availableTokens: Double
+    private var lastRefillAt: Date
+    private let clock: any FoodSearchClock
+
+    init(maximumTokens: Int = 8, refillInterval: TimeInterval = 60, clock: any FoodSearchClock = SystemFoodSearchClock()) {
+        self.maximumTokens = Double(maximumTokens)
+        self.refillInterval = refillInterval
+        availableTokens = Double(maximumTokens)
+        lastRefillAt = clock.now()
+        self.clock = clock
+    }
+
+    /// Attempts to consume one token. Returns `false` when the caller should
+    /// degrade (cached/local results) instead of making a remote request.
+    func tryConsume() -> Bool {
+        refill()
+        guard availableTokens >= 1 else { return false }
+        availableTokens -= 1
+        return true
+    }
+
+    private func refill() {
+        let now = clock.now()
+        let elapsed = now.timeIntervalSince(lastRefillAt)
+        guard elapsed > 0 else { return }
+        let refillRatePerSecond = maximumTokens / refillInterval
+        availableTokens = min(maximumTokens, availableTokens + elapsed * refillRatePerSecond)
+        lastRefillAt = now
+    }
+}
+
+struct OpenFoodFactsService: FoodDatabaseService {
+    var transport: any FoodSearchTransport = URLSessionFoodSearchTransport()
+    var cache = FoodSearchCache()
+    var rateLimiter = FoodSearchRateLimiter()
+
     func search(_ query: String) async throws -> [FoodSearchResult] {
-        guard var components = URLComponents(string: "https://world.openfoodfacts.org/cgi/search.pl") else {
+        let key = FoodSearchCache.normalizedKey(query)
+        if let cached = await cache.results(for: key) {
+            return cached
+        }
+        guard await rateLimiter.tryConsume() else {
+            // Rate limit exhausted: degrade to the last known results for this
+            // query (even if stale) instead of erroring. `CompositeFoodDatabaseService`
+            // still has local-catalog results to fall back on when this is empty.
+            return await cache.staleResults(for: key) ?? []
+        }
+        let results = try await performRemoteSearch(query)
+        await cache.store(results, for: key)
+        return results
+    }
+
+    private func performRemoteSearch(_ query: String) async throws -> [FoodSearchResult] {
+        guard var components = URLComponents(string: "https://world.openfoodfacts.org/api/v2/search") else {
             throw FoodServiceError.unavailable
         }
         components.queryItems = [
             .init(name: "search_terms", value: query),
-            .init(name: "search_simple", value: "1"),
-            .init(name: "action", value: "process"),
-            .init(name: "json", value: "1"),
-            .init(name: "page_size", value: "20")
+            .init(name: "page_size", value: "20"),
+            .init(name: "fields", value: "code,product_name,brands,nutriments,serving_quantity")
         ]
         guard let url = components.url else { throw FoodServiceError.unavailable }
         var request = URLRequest(url: url, timeoutInterval: 12)
         request.setValue("Fuel-iOS/1.0 (nutrition search)", forHTTPHeaderField: "User-Agent")
-        let (data, response) = try await session.data(for: request)
-        guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw FoodServiceError.unavailable }
+        let (data, response) = try await transport.data(for: request)
+        guard response.statusCode == 200 else { throw FoodServiceError.unavailable }
         let payload = try JSONDecoder().decode(Response.self, from: data)
         return payload.products.compactMap(\.domainValue)
     }
@@ -225,7 +366,12 @@ struct MealImageProcessor: MealImageProcessing {
 }
 
 struct OnDeviceFoodRecognitionService: FoodRecognitionService {
-    var database: any FoodDatabaseService = CompositeFoodDatabaseService()
+    // Recognition matches Vision labels against the bundled catalog only —
+    // never remote. Up to 8 Vision observations can each trigger a lookup, and
+    // routing those through `CompositeFoodDatabaseService` (as before) meant a
+    // single photo could fire up to 8 Open Food Facts requests. Interactive
+    // search still uses the composite (local + remote) path.
+    var database: any FoodDatabaseService = LocalFoodDatabaseService()
 
     func analyze(imageData: Data) async throws -> FoodRecognitionResult {
         try Task.checkCancellation()

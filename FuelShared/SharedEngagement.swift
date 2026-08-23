@@ -125,7 +125,7 @@ struct AddWaterIntent: AppIntent {
 
 struct OpenMealLoggerIntent: AppIntent {
     static let title: LocalizedStringResource = "Log a Meal"
-    static let description = IntentDescription("Open Fuel’s meal camera and editor.")
+    static let description = IntentDescription("Open Fuel’s meal photo picker and editor.")
     static let openAppWhenRun = true
 
     func perform() async throws -> some IntentResult {
@@ -143,7 +143,7 @@ struct FuelAppShortcuts: AppShortcutsProvider {
                 "Scan food with \(.applicationName)"
             ],
             shortTitle: "Log Meal",
-            systemImageName: "camera.viewfinder"
+            systemImageName: "photo.on.rectangle"
         )
         AppShortcut(
             intent: AddWaterIntent(),

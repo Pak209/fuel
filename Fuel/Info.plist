@@ -4,6 +4,12 @@
 <dict>
 	<key>FUEL_BACKEND_ENVIRONMENT</key>
 	<string>$(FUEL_BACKEND_ENVIRONMENT)</string>
+	<key>FUEL_BACKEND_BASE_URL</key>
+	<string>$(FUEL_BACKEND_BASE_URL)</string>
+	<key>UILaunchScreen</key>
+	<dict/>
+	<key>ITSAppUsesNonExemptEncryption</key>
+	<false/>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -25,9 +31,9 @@
 			<key>UIApplicationShortcutItemTitle</key>
 			<string>Scan a meal</string>
 			<key>UIApplicationShortcutItemSubtitle</key>
-			<string>Open the meal camera</string>
+			<string>Choose a meal photo</string>
 			<key>UIApplicationShortcutItemIconSymbolName</key>
-			<string>camera.viewfinder</string>
+			<string>photo.on.rectangle</string>
 		</dict>
 	</array>
 </dict>

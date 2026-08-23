@@ -17,8 +17,12 @@ final class MealsUITests: XCTestCase {
             throw XCTSkip("mealsAddButton not found on the Meals tab.")
         }
 
-        let originalName = "UITest Meal \(UUID().uuidString.prefix(6))"
-        let updatedName = "\(originalName) Updated"
+        // The updated name intentionally does not contain the original name as a substring —
+        // rowMatching does substring matching, and "Original Updated" would still match a
+        // search for "Original", making the post-rename assertion below vacuous.
+        let nameSuffix = UUID().uuidString.prefix(6)
+        let originalName = "UITest Meal Original \(nameSuffix)"
+        let updatedName = "UITest Meal Renamed \(nameSuffix)"
 
         // Create.
         addButton.tap()
@@ -52,12 +56,25 @@ final class MealsUITests: XCTestCase {
             "Original meal name should no longer be present after renaming"
         )
 
-        // Delete.
+        // Delete. "Delete meal" lives in the last section of the editor's Form, which — like a
+        // List — lazily instantiates rows, so the button may not exist in the accessibility
+        // tree yet at all (not just be off-screen). Scroll down until it materializes.
         updatedRow.tap()
         let deleteButton = app.buttons["mealEditorDelete"]
-        XCTAssertTrue(deleteButton.waitForExistence(timeout: UITestSupport.timeout))
+        var scrollAttempts = 0
+        while !deleteButton.waitForExistence(timeout: scrollAttempts == 0 ? UITestSupport.timeout : 1)
+            && scrollAttempts < 8 {
+            app.swipeUp()
+            scrollAttempts += 1
+        }
+        XCTAssertTrue(deleteButton.exists, "Expected mealEditorDelete to be reachable by scrolling the meal editor form")
         deleteButton.tap()
-        let confirmDeleteButton = app.buttons["Delete meal"]
+        // The confirmation dialog's destructive action shares the label "Delete meal" with the
+        // `mealEditorDelete` button underneath it (which is still present in the hierarchy), so
+        // a plain label lookup is ambiguous. Exclude the known identifier to isolate the dialog's button.
+        let confirmDeleteButton = app.buttons.matching(
+            NSPredicate(format: "label == %@ AND identifier != %@", "Delete meal", "mealEditorDelete")
+        ).firstMatch
         XCTAssertTrue(confirmDeleteButton.waitForExistence(timeout: UITestSupport.timeout))
         confirmDeleteButton.tap()
 
@@ -104,15 +121,25 @@ final class MealsUITests: XCTestCase {
         guard breakfastFilter.waitForExistence(timeout: UITestSupport.timeout) else {
             throw XCTSkip("Breakfast filter control not found inside mealsFilterMenu.")
         }
-        breakfastFilter.tap()
+        UITestSupport.tapAllowingOverlay(breakfastFilter)
         XCTAssertFalse(UITestSupport.rowMatching(nameA, in: app).waitForExistence(timeout: UITestSupport.shortTimeout))
         XCTAssertFalse(UITestSupport.rowMatching(nameB, in: app).exists)
 
         // ...and switching to "All" should bring them both back, proving the filter control
-        // actually changes what mealsList shows rather than being cosmetic.
+        // actually changes what mealsList shows rather than being cosmetic. "All" is the last
+        // item in the horizontally-scrolling filter menu, so it can start out past the right
+        // edge of the screen. Swipe the menu *container* (not a small button, which only
+        // drags within its own tiny frame, and not `allFilter.isHittable`, which itself
+        // throws a test failure when the element's activation point is off-screen) to bring
+        // it into view before tapping.
+        let filterMenuContainer: XCUIElement = app.scrollViews["mealsFilterMenu"].exists
+            ? app.scrollViews["mealsFilterMenu"]
+            : app.otherElements["mealsFilterMenu"]
+        filterMenuContainer.swipeLeft()
+
         let allFilter = app.buttons["All"]
         XCTAssertTrue(allFilter.waitForExistence(timeout: UITestSupport.timeout))
-        allFilter.tap()
+        UITestSupport.tapAllowingOverlay(allFilter)
         XCTAssertTrue(UITestSupport.rowMatching(nameA, in: app).waitForExistence(timeout: UITestSupport.timeout))
         XCTAssertTrue(UITestSupport.rowMatching(nameB, in: app).exists)
     }

@@ -81,7 +81,7 @@
 		};
 		FF0000000000000000000002 = {
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (Info.plist);
+			membershipExceptions = (Info.plist, Fuel.entitlements);
 			target = AA0000000000000000000004;
 		};
 		AA0000000000000000000008 = { isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Fuel.app; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -183,6 +183,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor;
 				CODE_SIGN_ENTITLEMENTS = Fuel/Fuel.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
@@ -203,13 +204,14 @@
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
 				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OBJC_BRIDGING_HEADER = "Fuel/System/Fuel-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = 1;
 			};
 			name = Debug;
 		};
-		AA0000000000000000000033 = { isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = Fuel/Fuel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_PREVIEWS = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Fuel/Info.plist; INFOPLIST_KEY_FUEL_BACKEND_ENVIRONMENT = "$(FUEL_BACKEND_ENVIRONMENT)"; INFOPLIST_KEY_NSHealthShareUsageDescription = "Fuel uses activity and recovery data to personalize your daily wellness summary."; INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose a meal photo to estimate its nutrition."; IPHONEOS_DEPLOYMENT_TARGET = 18.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
-		FF0000000000000000000021 = { isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; CODE_SIGN_ENTITLEMENTS = Fuel/Fuel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_PREVIEWS = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Fuel/Info.plist; INFOPLIST_KEY_FUEL_BACKEND_ENVIRONMENT = "$(FUEL_BACKEND_ENVIRONMENT)"; INFOPLIST_KEY_NSHealthShareUsageDescription = "Fuel uses activity and recovery data to personalize your daily wellness summary."; INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose a meal photo to estimate its nutrition."; IPHONEOS_DEPLOYMENT_TARGET = 18.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Staging; };
+		AA0000000000000000000033 = { isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_ENTITLEMENTS = Fuel/Fuel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_PREVIEWS = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Fuel/Info.plist; INFOPLIST_KEY_FUEL_BACKEND_ENVIRONMENT = "$(FUEL_BACKEND_ENVIRONMENT)"; INFOPLIST_KEY_NSHealthShareUsageDescription = "Fuel uses activity and recovery data to personalize your daily wellness summary."; INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose a meal photo to estimate its nutrition."; IPHONEOS_DEPLOYMENT_TARGET = 18.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OBJC_BRIDGING_HEADER = "Fuel/System/Fuel-Bridging-Header.h"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Release; };
+		FF0000000000000000000021 = { isa = XCBuildConfiguration; buildSettings = { ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon; ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME = AccentColor; CODE_SIGN_ENTITLEMENTS = Fuel/Fuel.entitlements; CODE_SIGN_STYLE = Automatic; CURRENT_PROJECT_VERSION = 1; DEVELOPMENT_TEAM = ""; ENABLE_PREVIEWS = YES; GENERATE_INFOPLIST_FILE = YES; INFOPLIST_FILE = Fuel/Info.plist; INFOPLIST_KEY_FUEL_BACKEND_ENVIRONMENT = "$(FUEL_BACKEND_ENVIRONMENT)"; INFOPLIST_KEY_NSHealthShareUsageDescription = "Fuel uses activity and recovery data to personalize your daily wellness summary."; INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Choose a meal photo to estimate its nutrition."; IPHONEOS_DEPLOYMENT_TARGET = 18.0; LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks"); MARKETING_VERSION = 1.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel; PRODUCT_NAME = "$(TARGET_NAME)"; SDKROOT = iphoneos; SUPPORTED_PLATFORMS = "iphoneos iphonesimulator"; SWIFT_EMIT_LOC_STRINGS = YES; SWIFT_OBJC_BRIDGING_HEADER = "Fuel/System/Fuel-Bridging-Header.h"; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; }; name = Staging; };
 		AA0000000000000000000034 = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel.tests; PRODUCT_NAME = FuelTests; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fuel.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fuel"; }; name = Debug; };
 		AA0000000000000000000035 = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel.tests; PRODUCT_NAME = FuelTests; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fuel.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fuel"; }; name = Release; };
 		FF0000000000000000000022 = { isa = XCBuildConfiguration; buildSettings = { BUNDLE_LOADER = "$(TEST_HOST)"; CODE_SIGN_STYLE = Automatic; GENERATE_INFOPLIST_FILE = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; PRODUCT_BUNDLE_IDENTIFIER = com.pak.fuel.tests; PRODUCT_NAME = FuelTests; SDKROOT = iphoneos; SWIFT_VERSION = 5.0; TARGETED_DEVICE_FAMILY = 1; TEST_HOST = "$(BUILT_PRODUCTS_DIR)/Fuel.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/Fuel"; }; name = Staging; };

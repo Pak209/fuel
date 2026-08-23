@@ -90,33 +90,14 @@ struct MetricCard: View {
     }
 }
 
-struct SectionHeader: View {
-    let title: String; var action: String?
-    var body: some View {
-        HStack {
-            Text(title).font(.system(size: 17, weight: .bold)).accessibilityAddTraits(.isHeader)
-            Spacer()
-            if let action {
-                Button(action) {}
-                    .font(.system(size: 13, weight: .semibold))
-                    .frame(minWidth: 44, minHeight: 44)
-                    .contentShape(Rectangle())
-            }
-        }
-    }
-}
-
 struct EmptyStateView: View {
     let icon: String; let title: String; let message: String
     var body: some View { ContentUnavailableView(title, systemImage: icon, description: Text(message)) }
 }
 
-struct LockedFeatureCard: View {
-    let title: String; let detail: String
-    var body: some View {
-        HStack(spacing: 14) { Image(systemName: "lock.fill").foregroundStyle(FuelTheme.purple).frame(width: 38, height: 38).background(FuelTheme.purple.opacity(0.14), in: Circle()); VStack(alignment: .leading) { Text(title).font(.headline); Text(detail).font(.subheadline).foregroundStyle(FuelTheme.secondary) }; Spacer(); Text("Premium").font(.caption.bold()).foregroundStyle(FuelTheme.purple) }
-            .cardStyle()
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(title), \(detail), Premium feature")
-    }
+enum FuelLayout {
+    /// Bottom clearance so scroll content doesn't sit under the tab bar.
+    /// Mirrors the bottom clearance already used for the transient message
+    /// banner in `FuelApp.swift` (`AppRootView`'s `.padding(.bottom, 74)`).
+    static let tabBarClearance: CGFloat = 74
 }

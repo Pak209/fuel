@@ -39,10 +39,8 @@ struct ProfileView: View {
                 Section("About") {
                     LabeledContent("Version", value: appVersion)
                     NavigationLink("Support") { SupportView() }
+                    NavigationLink("Privacy policy") { PrivacyPolicyView() }
                     NavigationLink("Safety and limitations") { SafetyInformationView() }
-                }
-                Section("Fuel+") {
-                    LockedFeatureCard(title: "Premium coaching", detail: "Weekly reports, deep insights, meal plans, family mode and AI chat.")
                 }
             }
             .scrollContentBackground(.hidden)
@@ -129,7 +127,7 @@ private struct AccountAndSyncView: View {
                     Button("Delete cloud account", role: .destructive) { confirmsRemoteDeletion = true }
                         .disabled(!state.accountSummary.cloudConnected)
                 }
-            } else {
+            } else if state.accountSummary.backendConfigured {
                 Section("Optional account") {
                     SignInWithAppleButton(.continue) { request in
                         do {
@@ -535,6 +533,10 @@ private struct DataSourcesView: View {
                 Label("Fuel common foods · offline", systemImage: "internaldrive")
                 Label("Open Food Facts · branded search", systemImage: "network")
                 Label("On-device Vision · photo candidates", systemImage: "eye")
+                Link(destination: URL(string: "https://world.openfoodfacts.org")!) {
+                    Text("Food data from Open Food Facts, licensed under ODbL")
+                }
+                .font(.caption)
             }
             Section { Text("Every saved food item retains its source and any user correction metadata.").font(.caption).foregroundStyle(FuelTheme.secondary) }
         }

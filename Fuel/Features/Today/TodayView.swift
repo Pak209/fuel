@@ -53,6 +53,9 @@ struct TodayView: View {
                 .padding(.horizontal, 12)
                 .padding(.top, 2)
             }
+            .safeAreaInset(edge: .bottom) {
+                Color.clear.frame(height: FuelLayout.tabBarClearance)
+            }
             .refreshable { await state.refresh() }
             .redacted(reason: state.dataPhase == .loading ? .placeholder : [])
         }
@@ -208,9 +211,6 @@ private struct DashboardHeader: View {
                     .font(.system(size: 15, weight: .medium))
                     .frame(width: 34, height: 34)
                     .background(FuelTheme.panel, in: Circle())
-                    .overlay(alignment: .topTrailing) {
-                        Circle().fill(.red).frame(width: 7, height: 7).offset(x: -4, y: 4)
-                    }
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }

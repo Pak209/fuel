@@ -503,6 +503,47 @@ struct FuelTests {
         #expect(try container.mainContext.fetch(FetchDescriptor<HydrationEntry>()).isEmpty)
     }
 
+    /// A damaged store must surface as an error the startup path can show in
+    /// `StartupFailureView`, never as a process abort — the ObjC exception
+    /// Core Data raises for an unreadable store is invisible to Swift `catch`.
+    @Test func corruptStoreReportsFailureInsteadOfKillingTheProcess() throws {
+        let directory = URL.temporaryDirectory.appending(path: "FuelStoreHealth-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+
+        let storeURL = directory.appending(path: "default.store")
+        try Data("this is not a SQLite database, not even close".utf8).write(to: storeURL)
+
+        #expect(StoreHealth.openFailureReason(forStoreAt: storeURL) != nil)
+        // A store that isn't there yet is a first launch, not a failure.
+        #expect(StoreHealth.openFailureReason(forStoreAt: directory.appending(path: "absent.store")) == nil)
+
+        // And a genuinely *raised* NSException — the shape Swift cannot catch —
+        // comes back as an NSError from the shim rather than aborting.
+        var caught: NSError?
+        #expect(throws: (any Error).self) {
+            do {
+                try StoreHealth.catchingObjCExceptions {
+                    NSException(name: .invalidArgumentException, reason: "simulated store failure", userInfo: nil).raise()
+                }
+            } catch {
+                caught = error as NSError
+                throw error
+            }
+        }
+        #expect(caught?.domain == "FuelObjCException")
+        #expect(caught?.localizedDescription == "simulated store failure")
+
+        // The check has to look where SwiftData actually puts the store: Fuel
+        // has an app group, so the default store lands in the shared container,
+        // not the app's own Application Support directory.
+        let resolved = StoreHealth.defaultStoreURL(for: Schema(versionedSchema: FuelSchemaV3.self))
+        #expect(resolved.lastPathComponent == "default.store")
+        if let group = FileManager.default.containerURL(forSecurityApplicationGroupIdentifier: FuelSharedStore.appGroupIdentifier) {
+            #expect(resolved.path.hasPrefix(group.path))
+        }
+    }
+
     @MainActor
     private func makeContainer() throws -> ModelContainer {
         let schema = Schema(versionedSchema: FuelSchemaV3.self)

@@ -84,7 +84,9 @@ final class AppState {
         self.insightsService = insightsService
         self.dataExportService = dataExportService
         self.foodDatabase = foodDatabase
-        self.recognitionService = recognitionService ?? OnDeviceFoodRecognitionService(database: foodDatabase)
+        // Photo recognition resolves labels against the bundled catalog only, so a scan
+        // never generates Open Food Facts traffic; interactive search keeps `foodDatabase`.
+        self.recognitionService = recognitionService ?? OnDeviceFoodRecognitionService(database: LocalFoodDatabaseService())
         self.imageProcessor = imageProcessor
         self.healthService = healthService
         self.notificationScheduler = notificationScheduler
