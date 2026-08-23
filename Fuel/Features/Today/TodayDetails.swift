@@ -52,7 +52,7 @@ struct RecommendationDetailView: View {
     var body: some View {
         List {
             Section {
-                Label(recommendation.title, systemImage: "sparkles")
+                Label(recommendation.title, systemImage: "lightbulb")
                     .font(.title3.bold())
                     .foregroundStyle(FuelTheme.green)
                 Text(recommendation.reason)
@@ -63,8 +63,11 @@ struct RecommendationDetailView: View {
                 }
             }
             Section("Why you’re seeing this") {
-                ForEach(recommendation.dataUsed, id: \.self) { Text($0) }
-                LabeledContent("Confidence", value: recommendation.confidence.formatted(.percent.precision(.fractionLength(0))))
+                // Real logged values, not a confidence percentage: this is a
+                // fixed rules engine reading the user's own entries, and a
+                // "Confidence 96%" figure implied a model that doesn't exist.
+                Text(currentValue)
+                ForEach(recommendation.dataUsed, id: \.self) { Text($0).foregroundStyle(FuelTheme.secondary) }
                 Text(recommendation.limitation).font(.caption).foregroundStyle(FuelTheme.secondary)
             }
             Section("Was this useful?") {
@@ -78,6 +81,14 @@ struct RecommendationDetailView: View {
         .alert("Couldn’t save feedback", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "Unknown error") }
+    }
+
+    private var currentValue: String {
+        RecommendationFacts.headline(
+            for: recommendation,
+            nutrition: state.snapshot.nutrition,
+            sleep: state.snapshot.sleep
+        )
     }
 
     private func record(_ kind: RecommendationFeedbackKind) {

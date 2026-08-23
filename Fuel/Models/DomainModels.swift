@@ -35,8 +35,8 @@ enum SyncOperationKind: String, Codable, CaseIterable { case create, update, del
 enum SyncOperationState: String, Codable, CaseIterable { case pending, uploading, failed, completed }
 
 struct UserProfile: Codable, Hashable {
-    var firstName = "Pak"
-    var ageRange = "25–34"
+    var firstName = ""
+    var ageRange = ""
     var heightCM = 175.0
     var weightKG = 72.0
     var goal: UserGoal = .improveNutrition

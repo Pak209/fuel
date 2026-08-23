@@ -12,7 +12,7 @@ struct TodayView: View {
         ZStack {
             FuelTheme.background.ignoresSafeArea()
             ScrollView {
-                LazyVStack(spacing: 10) {
+                LazyVStack(spacing: 12) {
                     DashboardHeader(
                         greeting: greeting,
                         firstName: state.profile.firstName,
@@ -23,17 +23,19 @@ struct TodayView: View {
                         notifications: { sheet = .notifications },
                         profile: { state.selectedTab = .profile }
                     )
+                    CaloriesHeroCard(balance: state.calorieBalance)
+                    DailyMetricsRow(snapshot: state.snapshot, balance: state.calorieBalance)
                     Button { sheet = .score } label: { CompactHealthScoreCard(score: state.healthScore) }
                         .buttonStyle(.plain)
                         .accessibilityIdentifier("todayHealthScoreButton")
-                    DailyMetricsRow(snapshot: state.snapshot, balance: state.calorieBalance)
-                    RecommendationCard(recommendation: state.recommendation) { sheet = .recommendation }
+                    RecommendationCard(recommendation: state.recommendation, nutrition: state.snapshot.nutrition, sleep: state.snapshot.sleep) { sheet = .recommendation }
                         .accessibilityIdentifier("todayRecommendationButton")
                     TodayTimeline(
                         snapshot: state.snapshot,
                         onMeal: openMeal,
                         onWorkout: { sheet = .workout($0) },
-                        onAddWater: { sheet = .hydration },
+                        onAddWater: addWater,
+                        onWaterDetails: { sheet = .hydration },
                         onSleep: { sheet = .sleep },
                         onAddEvent: { sheet = .newMeal },
                         onCompleteMeal: completeMeal
@@ -110,6 +112,16 @@ struct TodayView: View {
         Task { await state.refresh() }
     }
 
+    /// One tap on the Water row logs the 250 ml the row's label promises;
+    /// `addWater()` posts its own "Water added" toast. The row's trailing
+    /// chevron opens `HydrationLogView` for edits and history.
+    private func addWater() {
+        Task {
+            do { try await state.addWater() }
+            catch { fail(error) }
+        }
+    }
+
     private func openMeal(_ summary: MealSummary) {
         do {
             if let meal = try state.meal(id: summary.id) { sheet = .meal(meal) }
@@ -151,6 +163,7 @@ private enum TodaySheet: Identifiable {
 
 private struct DashboardHeader: View {
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @ScaledMetric(relativeTo: .largeTitle) private var avatarSize: CGFloat = 35
     let greeting: String
     let firstName: String
     let selectedDate: Date
@@ -162,25 +175,19 @@ private struct DashboardHeader: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
+            // The greeting is chrome, not data: it stays a caption so the
+            // largest type on Today belongs to the calories hero below.
             if dynamicTypeSize.isAccessibilitySize {
                 HStack { Spacer(); headerActions }
-                Text("\(greeting), \(firstName) 👋")
-                    .font(.system(.subheadline, design: .rounded, weight: .semibold))
-                Text("Here’s your dashboard")
-                    .font(.system(.title2, design: .rounded, weight: .bold))
+                greetingLabel
             } else {
                 HStack {
-                    Text("\(greeting), \(firstName) 👋")
-                        .font(.system(.subheadline, design: .rounded, weight: .semibold))
+                    greetingLabel
                         .lineLimit(1)
                         .minimumScaleFactor(0.82)
                     Spacer()
                     headerActions
                 }
-                Text("Here’s your dashboard")
-                    .font(.system(.title2, design: .rounded, weight: .bold))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.82)
             }
             HStack(spacing: 8) {
                 Button(action: previousDay) { Image(systemName: "chevron.left").frame(minWidth: 44, minHeight: 44).contentShape(Rectangle()) }
@@ -204,11 +211,17 @@ private struct DashboardHeader: View {
         }
     }
 
+    private var greetingLabel: some View {
+        Text(firstName.isEmpty ? greeting : "\(greeting), \(firstName) 👋")
+            .font(.caption.weight(.semibold))
+            .foregroundStyle(FuelTheme.secondary)
+    }
+
     private var headerActions: some View {
         HStack(spacing: 8) {
             Button(action: notifications) {
                 Image(systemName: "bell")
-                    .font(.system(size: 15, weight: .medium))
+                    .font(.subheadline.weight(.medium))
                     .frame(width: 34, height: 34)
                     .background(FuelTheme.panel, in: Circle())
                     .frame(minWidth: 44, minHeight: 44)
@@ -218,12 +231,12 @@ private struct DashboardHeader: View {
             .accessibilityIdentifier("todayNotificationsButton")
             Button(action: profile) {
                 Image(systemName: "person.crop.circle.fill")
-                    .font(.system(size: 35))
-                    .foregroundStyle(.orange)
+                    .font(.system(size: avatarSize))
+                    .foregroundStyle(FuelTheme.secondary)
                     .frame(minWidth: 44, minHeight: 44)
                     .contentShape(Rectangle())
             }
-            .accessibilityLabel("\(firstName)’s profile")
+            .accessibilityLabel(firstName.isEmpty ? "Profile" : "\(firstName)’s profile")
             .accessibilityIdentifier("todayProfileButton")
         }
     }
@@ -255,6 +268,7 @@ private struct CompactHealthScoreCard: View {
                 nutrientList
             }
             message.lineLimit(2)
+            unavailableFootnote.lineLimit(2)
         }
     }
 
@@ -267,6 +281,7 @@ private struct CompactHealthScoreCard: View {
             }
             nutrientList
             message
+            unavailableFootnote
         }
     }
 
@@ -284,23 +299,38 @@ private struct CompactHealthScoreCard: View {
     private var scoreValue: some View {
         VStack(alignment: .leading, spacing: -2) {
             Text("\(score.overall)")
-                .font(.system(size: 37, weight: .bold, design: .rounded))
+                .font(.system(.title2, design: .rounded, weight: .bold))
                 .foregroundStyle(FuelTheme.green)
             Text("/100")
-                .font(.system(size: 13, weight: .medium, design: .rounded))
+                .font(.footnote.weight(.medium))
                 .foregroundStyle(FuelTheme.secondary)
         }
         .lineLimit(1)
         .fixedSize(horizontal: true, vertical: false)
     }
 
+    /// Categories without a data source are dropped rather than rendered as a
+    /// dead "—" row; a single footnote explains the omission instead.
+    private var availableCategories: [HealthScoreCategory] {
+        HealthScoreCategory.allCases.filter { !score.unavailableCategories.contains($0) }
+    }
+
     private var nutrientList: some View {
         VStack(spacing: 2) {
-            ForEach(HealthScoreCategory.allCases, id: \.self) {
-                NutrientProgressRow(category: $0, score: score.unavailableCategories.contains($0) ? nil : score.categories[$0])
+            ForEach(availableCategories, id: \.self) {
+                NutrientProgressRow(category: $0, score: score.categories[$0])
             }
         }
         .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var unavailableFootnote: some View {
+        if !score.unavailableCategories.isEmpty {
+            Text("Connect Health in Profile to include recovery.")
+                .font(.caption2)
+                .foregroundStyle(FuelTheme.secondary)
+        }
     }
 }
 
@@ -317,12 +347,12 @@ private struct DailyMetricsRow: View {
 
     @ViewBuilder private var metricCards: some View {
             MetricCard(
-                title: "Calories",
-                icon: "flame.fill",
-                value: snapshot.nutrition.calories.formatted(),
-                detail: calorieDetail,
+                title: "Protein",
+                icon: "fork.knife",
+                value: "\(Int(snapshot.nutrition.protein.rounded())) g",
+                detail: proteinDetail,
                 color: FuelTheme.green,
-                progress: calorieProgress
+                progress: proteinProgress
             )
             MetricCard(
                 title: "Activity",
@@ -330,7 +360,8 @@ private struct DailyMetricsRow: View {
                 value: activityValue,
                 detail: activityDetail,
                 color: FuelTheme.green,
-                progress: activityProgress
+                progress: activityProgress,
+                isPlaceholder: !isActivityAvailable
             )
             MetricCard(
                 title: "Active",
@@ -338,15 +369,15 @@ private struct DailyMetricsRow: View {
                 value: activeEnergyValue,
                 detail: activeEnergyDetail,
                 color: FuelTheme.green,
-                progress: activityProgress
+                progress: activityProgress,
+                isPlaceholder: !isActivityAvailable
             )
     }
 
-    private var calorieProgress: Double { Double(snapshot.nutrition.calories) / Double(max(1, snapshot.nutrition.targetCalories)) }
-    private var calorieDetail: String {
-        let remaining = balance.estimatedRemaining
-        return remaining >= 0 ? "\(remaining.formatted()) left" : "\((-remaining).formatted()) over"
-    }
+    private var isActivityAvailable: Bool { snapshot.activity.availability == .available }
+
+    private var proteinProgress: Double { snapshot.nutrition.protein / max(1, snapshot.nutrition.targets.proteinGrams) }
+    private var proteinDetail: String { "of \(Int(snapshot.nutrition.targets.proteinGrams)) g target" }
     private var activityValue: String { snapshot.activity.availability == .available ? snapshot.activity.steps.formatted() : "—" }
     private var activityDetail: String { snapshot.activity.availability == .available ? "\(Int(activityProgress * 100))% of goal" : "No Health data" }
     private var activityProgress: Double { Double(snapshot.activity.steps) / Double(max(1, snapshot.activity.stepGoal)) }
@@ -359,15 +390,74 @@ private struct DailyMetricsRow: View {
     }
 }
 
+/// Real, already-logged numbers behind the current suggestion.
+///
+/// Replaces the card's old "+9 potential score points" line, which priced a
+/// hypothetical action in a proprietary unit. These are values the user can
+/// verify against their own log, tied to the nutrient the suggestion is about.
+enum RecommendationFacts {
+    static func headline(
+        for recommendation: NutritionRecommendation,
+        nutrition: DailyNutritionSummary,
+        sleep: SleepSummary
+    ) -> String {
+        switch recommendation.nutrients.first {
+        case "Fiber":
+            "Fiber so far: \(grams(nutrition.fiber)) of \(grams(nutrition.fiberGoal)) g"
+        case "Protein":
+            "Protein so far: \(grams(nutrition.protein)) of \(grams(nutrition.targets.proteinGrams)) g"
+        case "Hydration":
+            "Water so far: \(whole(nutrition.hydrationMilliliters)) of \(whole(nutrition.targets.hydrationMilliliters)) ml"
+        case "Potassium":
+            "Potassium from logged foods: about \(whole(nutrition.consumed.potassium)) mg"
+        case "Energy", "Carbohydrates":
+            energyFact(nutrition)
+        case "Recovery":
+            sleep.availability == .available
+                ? "Sleep last night: \(sleep.durationMinutes / 60)h \(sleep.durationMinutes % 60)m of \(sleep.targetMinutes / 60)h target"
+                : "Based on your configured recovery target"
+        default:
+            mealCountFact(nutrition)
+        }
+    }
+
+    private static func energyFact(_ nutrition: DailyNutritionSummary) -> String {
+        let remaining = nutrition.targetCalories - nutrition.calories
+        return remaining > 0
+            ? "\(remaining.formatted()) cal left of today’s target"
+            : "\(nutrition.calories.formatted()) cal logged today"
+    }
+
+    private static func mealCountFact(_ nutrition: DailyNutritionSummary) -> String {
+        switch nutrition.mealCount {
+        case 0: "No meals logged yet today"
+        case 1: "1 meal logged today"
+        default: "\(nutrition.mealCount) meals logged today"
+        }
+    }
+
+    private static func grams(_ value: Double) -> String { Int(value.rounded()).formatted() }
+    private static func whole(_ value: Double) -> String { Int(value.rounded()).formatted() }
+}
+
 private struct RecommendationCard: View {
     let recommendation: NutritionRecommendation
+    let nutrition: DailyNutritionSummary
+    let sleep: SleepSummary
     let action: () -> Void
+
+    private var fact: String {
+        RecommendationFacts.headline(for: recommendation, nutrition: nutrition, sleep: sleep)
+    }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 10) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Label("AI Recommendation", systemImage: "sparkles")
+                    // Not "AI": these come from a fixed rules engine over the
+                    // user's own logged values, and labeling them otherwise
+                    // overstates what the app is doing.
+                    Label("Suggested next step", systemImage: "lightbulb")
                         .font(.caption.bold())
                         .foregroundStyle(FuelTheme.green)
                     Text(recommendation.title)
@@ -375,9 +465,11 @@ private struct RecommendationCard: View {
                         .foregroundStyle(.white)
                         .multilineTextAlignment(.leading)
                         .lineLimit(2)
-                    Text(recommendation.estimatedImprovement > 0 ? "+\(recommendation.estimatedImprovement) potential score points" : "Build your daily summary")
+                    Text(fact)
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(FuelTheme.green)
+                        .foregroundStyle(FuelTheme.secondary)
+                        .multilineTextAlignment(.leading)
+                        .lineLimit(2)
                 }
                 Spacer(minLength: 4)
                 Image(systemName: "chevron.right")
@@ -388,6 +480,8 @@ private struct RecommendationCard: View {
             .cardStyle(padding: 12)
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Suggested next step. \(recommendation.title) \(fact)")
         .accessibilityHint(recommendation.reason)
     }
 }
@@ -397,6 +491,7 @@ private struct TodayTimeline: View {
     let onMeal: (MealSummary) -> Void
     let onWorkout: (WorkoutSummary) -> Void
     let onAddWater: () -> Void
+    let onWaterDetails: () -> Void
     let onSleep: () -> Void
     let onAddEvent: () -> Void
     let onCompleteMeal: (MealSummary) -> Void
@@ -440,11 +535,28 @@ private struct TodayTimeline: View {
                 }
                 .buttonStyle(.plain)
             }
-            Button(action: onAddWater) {
-                TimelineRow(icon: "drop", color: FuelTheme.blue, title: "Water", time: "All day", item: "\(Int(snapshot.nutrition.hydrationMilliliters).formatted()) ml", detail: "Tap to add 250 ml", complete: nil)
+            HStack(spacing: 0) {
+                // The row does exactly what its label says — one tap logs
+                // 250 ml (`addWater()` posts its own toast). Editing and
+                // history moved to the trailing chevron beside it.
+                Button(action: onAddWater) {
+                    TimelineRow(icon: "drop", color: FuelTheme.blue, title: "Water", time: "All day", item: "\(hydrationMilliliters) ml", detail: "Tap to add 250 ml", complete: nil, showsAccessory: false)
+                }
+                .buttonStyle(.plain)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Water, \(hydrationMilliliters) milliliters logged today")
+                .accessibilityHint("Adds 250 milliliters")
+                .accessibilityIdentifier("todayAddWaterButton")
+                Button(action: onWaterDetails) {
+                    Image(systemName: "chevron.right")
+                        .foregroundStyle(FuelTheme.secondary)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Water details")
+                .accessibilityIdentifier("todayWaterDetailsButton")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("todayAddWaterButton")
             Button(action: onSleep) {
                 TimelineRow(icon: "moon", color: FuelTheme.purple, title: "Sleep", time: "Last night", item: sleepValue, detail: snapshot.sleep.quality, complete: nil)
             }
@@ -452,6 +564,8 @@ private struct TodayTimeline: View {
             .accessibilityIdentifier("todaySleepButton")
         }.cardStyle(padding: 12)
     }
+
+    private var hydrationMilliliters: String { Int(snapshot.nutrition.hydrationMilliliters).formatted() }
 
     private var sleepValue: String {
         guard snapshot.sleep.availability == .available else { return "No sleep data" }
@@ -479,6 +593,10 @@ private struct DataErrorBanner: View {
 
 struct TimelineRow: View {
     let icon: String; let color: Color; let title: String; let time: String; let item: String; let detail: String; let complete: Bool?
+    /// Set false when the row's trailing affordance lives outside the row
+    /// (the Water row owns a separate details button), so the disclosure
+    /// chevron isn't drawn twice.
+    var showsAccessory = true
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     var body: some View {
         Group {
@@ -495,7 +613,8 @@ struct TimelineRow: View {
             VStack(alignment: .leading, spacing: 1) { Text(title).font(.subheadline.bold()); Text(time).font(.caption2).foregroundStyle(FuelTheme.secondary) }.frame(width: 70, alignment: .leading)
             VStack(alignment: .leading, spacing: 1) { Text(item).font(.subheadline.weight(.semibold)); Text(detail).font(.caption2).foregroundStyle(detail == "Good" ? FuelTheme.purple : FuelTheme.secondary) }
             Spacer()
-            if let complete { Image(systemName: complete ? "checkmark.circle" : "circle").foregroundStyle(complete ? FuelTheme.green : FuelTheme.secondary) } else { Image(systemName: "chevron.right").foregroundStyle(FuelTheme.secondary) }
+            if let complete { Image(systemName: complete ? "checkmark.circle" : "circle").foregroundStyle(complete ? FuelTheme.green : FuelTheme.secondary) }
+            else if showsAccessory { Image(systemName: "chevron.right").foregroundStyle(FuelTheme.secondary) }
         }
     }
 
@@ -510,7 +629,7 @@ struct TimelineRow: View {
             }
             Spacer()
             if let complete { Image(systemName: complete ? "checkmark.circle" : "circle").foregroundStyle(complete ? FuelTheme.green : FuelTheme.secondary) }
-            else { Image(systemName: "chevron.right").foregroundStyle(FuelTheme.secondary) }
+            else if showsAccessory { Image(systemName: "chevron.right").foregroundStyle(FuelTheme.secondary) }
         }
     }
 }

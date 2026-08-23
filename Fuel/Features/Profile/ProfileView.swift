@@ -18,7 +18,7 @@ struct ProfileView: View {
                     LabeledContent("Diet", value: state.profile.dietaryPreference.rawValue)
                 }
                 Section("Preferences") {
-                    NavigationLink("Units and appearance") { AppPreferencesView(state: state) }
+                    NavigationLink("Units") { AppPreferencesView(state: state) }
                     NavigationLink("Notifications") { NotificationPreferencesView(state: state) }
                 }
                 Section("Connections") {
@@ -52,7 +52,7 @@ struct ProfileView: View {
     private var profileHeader: some View {
         Section {
             HStack(spacing: 14) {
-                Image(systemName: "person.crop.circle.fill").font(.system(size: 56)).foregroundStyle(.orange)
+                Image(systemName: "person.crop.circle.fill").font(.system(size: 56)).foregroundStyle(FuelTheme.secondary)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(state.profile.firstName).font(.title2.bold())
                     Text(state.profile.goal.rawValue).foregroundStyle(FuelTheme.secondary)
@@ -374,11 +374,8 @@ struct AppPreferencesView: View {
                 Text("Metric").tag(UnitSystem.metric)
                 Text("US / Imperial").tag(UnitSystem.imperial)
             }
-            Picker("Appearance", selection: $preferences.appearance) {
-                ForEach(AppAppearance.allCases, id: \.self) { Text($0.rawValue.capitalized).tag($0) }
-            }
         }
-        .navigationTitle("Units and appearance")
+        .navigationTitle("Units")
         .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Save", action: save) } }
         .alert("Couldn’t save preferences", isPresented: errorBinding) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "Unknown error") }
     }

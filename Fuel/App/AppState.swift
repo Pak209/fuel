@@ -189,11 +189,71 @@ final class AppState {
 
     func saveMeal(_ draft: MealDraft) async throws {
         guard let coordinator else { throw LocalDataError.notConfigured }
+        let nutritionBeforeSave = snapshot.nutrition
         let meal = try await coordinator.saveMeal(draft)
         try await reloadAfterMutation()
-        transientMessage = "Meal saved"
+        transientMessage = draft.status == .logged
+            ? Self.logConfirmation(name: meal.name, before: nutritionBeforeSave, after: snapshot.nutrition)
+            : "Meal saved"
         await SpotlightIndexer.index(meal: meal)
         recordAnalytics(.mealLogged(source: draft.provenance == .aiEstimated ? .photoScan : .manualEntry))
+    }
+
+    /// The confirmation shown after a meal is logged, e.g.
+    /// `"Logged Yogurt bowl — protein 63→74 g · 1,140 cal left"`.
+    ///
+    /// ED-safe by construction: every clause is an additive fact about what
+    /// was just added, only one macro gain is named (so the line stays short
+    /// and never reads as a checklist), calories past the
+    /// target are reported as what was logged rather than as an amount
+    /// "over", and the health score is never mentioned — it can move down for
+    /// reasons that have nothing to do with the meal the user just recorded.
+    static func logConfirmation(name: String, before: DailyNutritionSummary, after: DailyNutritionSummary) -> String {
+        let trimmedName = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let headline = trimmedName.isEmpty ? "Meal logged" : "Logged \(trimmedName)"
+        let macroClause = notableMacroGain(before: before, after: after)
+        let addedCalories = after.calories - before.calories
+        // Nothing measurable changed for the day on screen (a meal saved onto
+        // another day, or an empty entry): stay with the plain confirmation
+        // rather than reporting numbers that didn't move.
+        guard macroClause != nil || addedCalories > 0 else { return "Meal saved" }
+
+        var clauses: [String] = []
+        if let macroClause { clauses.append(macroClause) }
+        let remaining = after.targetCalories - after.calories
+        if remaining > 0 {
+            clauses.append("\(remaining.formatted()) cal left")
+        } else if addedCalories > 0 {
+            clauses.append("\(addedCalories.formatted()) cal logged")
+        }
+        guard !clauses.isEmpty else { return headline }
+        return "\(headline) — \(clauses.joined(separator: " · "))"
+    }
+
+    /// The single most notable macro increase from this save, as
+    /// `"protein 63→74 g"`. Decreases are never surfaced.
+    ///
+    /// "Most notable" is the largest share of that macro's own daily target,
+    /// not the largest number of grams: carbohydrates outweigh every other
+    /// macro in raw grams, so ranking by gram count would print "carbs" on
+    /// practically every meal and say nothing about what the meal actually
+    /// contributed.
+    private static func notableMacroGain(before: DailyNutritionSummary, after: DailyNutritionSummary) -> String? {
+        let targets = after.targets
+        let macros: [(label: String, before: Double, after: Double, target: Double)] = [
+            ("protein", before.consumed.protein, after.consumed.protein, targets.proteinGrams),
+            ("fiber", before.consumed.fiber, after.consumed.fiber, targets.fiberGrams),
+            ("carbs", before.consumed.carbohydrates, after.consumed.carbohydrates, targets.carbohydrateGrams),
+            ("fat", before.consumed.fat, after.consumed.fat, targets.fatGrams)
+        ]
+        let gains: [(text: String, share: Double)] = macros.compactMap { macro in
+            let start = Int(macro.before.rounded())
+            let end = Int(macro.after.rounded())
+            guard end > start else { return nil }
+            let share = Double(end - start) / max(1, macro.target)
+            return ("\(macro.label) \(start)→\(end) g", share)
+        }
+        return gains.max(by: { $0.share < $1.share })?.text
     }
 
     func deleteMeal(_ meal: Meal) async throws {

@@ -58,6 +58,9 @@ struct InsightsView: View {
             Text("\(Int(report.dataCompleteness * 100))% data completeness")
                 .font(.caption)
                 .foregroundStyle(FuelTheme.secondary)
+            Text("Reflects connected Health sources — logging counts separately.")
+                .font(.caption2)
+                .foregroundStyle(FuelTheme.secondary)
         }
         .cardStyle(padding: 14)
         .accessibilityElement(children: .ignore)
@@ -65,21 +68,49 @@ struct InsightsView: View {
     }
 
     private func trendChart(_ report: InsightsReport) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        let targetCalories = state.targets.calories
+        return VStack(alignment: .leading, spacing: 10) {
             Text("Logged energy").font(.headline)
             Text(dateRange(report)).font(.caption).foregroundStyle(FuelTheme.secondary)
-            Chart(report.trends) { point in
-                BarMark(
-                    x: .value("Day", point.date, unit: .day),
-                    y: .value("Calories", point.calories)
-                )
-                .foregroundStyle(point.calories > 0 ? FuelTheme.green.gradient : FuelTheme.panelRaised.gradient)
-                .accessibilityLabel(point.date.formatted(date: .abbreviated, time: .omitted))
-                .accessibilityValue("\(Int(point.calories)) logged calories")
+            Chart {
+                ForEach(report.trends) { point in
+                    BarMark(
+                        x: .value("Day", point.date, unit: .day),
+                        y: .value("Calories", point.calories)
+                    )
+                    .foregroundStyle(point.calories > 0 ? FuelTheme.green.gradient : FuelTheme.panelRaised.gradient)
+                    .accessibilityLabel(point.date.formatted(date: .abbreviated, time: .omitted))
+                    .accessibilityValue("\(Int(point.calories)) logged calories")
+                }
+                RuleMark(y: .value("Target", targetCalories))
+                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+                    .foregroundStyle(FuelTheme.secondary)
+                    .annotation(position: .top, alignment: .trailing) {
+                        Text("Target \(targetCalories.formatted())")
+                            .font(.caption2)
+                            .foregroundStyle(FuelTheme.secondary)
+                    }
+                    .accessibilityHidden(true)
+            }
+            .chartXScale(domain: report.startDate...report.endDate)
+            .chartXAxis {
+                if report.requestedDays <= 7 {
+                    AxisMarks(values: .stride(by: .day)) { _ in
+                        AxisValueLabel(format: .dateTime.weekday(.abbreviated))
+                        AxisGridLine()
+                        AxisTick()
+                    }
+                } else {
+                    AxisMarks(values: .stride(by: .day, count: 7)) { _ in
+                        AxisValueLabel(format: .dateTime.month(.abbreviated).day())
+                        AxisGridLine()
+                        AxisTick()
+                    }
+                }
             }
             .chartYAxisLabel("Calories")
             .frame(height: 190)
-            .accessibilityChartDescriptor(TrendChartDescriptor(report: report))
+            .accessibilityChartDescriptor(TrendChartDescriptor(report: report, targetCalories: targetCalories))
             Text("Days without meals remain visible as missing logs rather than being removed from the range.")
                 .font(.caption)
                 .foregroundStyle(FuelTheme.secondary)
@@ -115,7 +146,10 @@ struct InsightsView: View {
     }
 
     private func dateRange(_ report: InsightsReport) -> String {
-        "\(report.startDate.formatted(date: .abbreviated, time: .omitted)) – \(report.endDate.formatted(date: .abbreviated, time: .omitted))"
+        // `endDate` is an exclusive upper bound (start of the day after the range),
+        // so the displayed end must be shifted back one day to show the last included day.
+        let inclusiveEnd = Calendar.current.date(byAdding: .day, value: -1, to: report.endDate) ?? report.endDate
+        return "\(report.startDate.formatted(date: .abbreviated, time: .omitted)) – \(inclusiveEnd.formatted(date: .abbreviated, time: .omitted))"
     }
 
     private func load() async {
@@ -137,9 +171,12 @@ struct InsightsView: View {
 /// trend chart, built from the same `DailyTrendPoint` series the visual chart uses.
 private struct TrendChartDescriptor: AXChartDescriptorRepresentable {
     let report: InsightsReport
+    let targetCalories: Int
 
     func makeChartDescriptor() -> AXChartDescriptor {
-        let calories = report.trends.map(\.calories)
+        // Include the target line's value so the accessible axis range matches what's
+        // now visually plotted (the dashed target rule can exceed the logged-calorie range).
+        let calories = report.trends.map(\.calories) + [Double(targetCalories)]
         let minCalories = calories.min() ?? 0
         let maxCalories = max(calories.max() ?? 1, minCalories + 1)
 
@@ -149,7 +186,7 @@ private struct TrendChartDescriptor: AXChartDescriptorRepresentable {
         )
 
         let yAxis = AXNumericDataAxisDescriptor(
-            title: "Calories",
+            title: "Calories, target \(targetCalories) per day",
             range: minCalories...maxCalories,
             gridlinePositions: []
         ) { value in "\(Int(value)) calories" }

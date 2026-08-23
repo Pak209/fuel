@@ -280,25 +280,24 @@ private struct TransientMessageBanner: View {
 }
 
 private extension AppAppearance {
-    var colorScheme: ColorScheme? {
-        switch self {
-        case .system: nil
-        case .dark: .dark
-        case .light: .light
-        }
-    }
+    /// v1 ships a single hardcoded dark palette (`FuelTheme`), so every stored
+    /// appearance resolves to Dark. Honoring `.light`/`.system` rendered the
+    /// app black-on-black on a light-mode device; the appearance picker is
+    /// removed from Settings and the stored value is kept only for decoding.
+    var colorScheme: ColorScheme { .dark }
 }
 
 enum FuelTheme {
     static let background = Color(red: 0.015, green: 0.025, blue: 0.023)
-    static let panel = Color(red: 0.045, green: 0.065, blue: 0.06)
-    static let panelRaised = Color(red: 0.065, green: 0.085, blue: 0.078)
+    static let panel = Color(red: 0.07, green: 0.09, blue: 0.085)
+    static let panelRaised = Color(red: 0.10, green: 0.12, blue: 0.11)
     static let border = Color.white.opacity(0.14)
     static let secondary = Color(red: 0.66, green: 0.68, blue: 0.71)
     static let green = Color(red: 0.30, green: 0.82, blue: 0.31)
     static let blue = Color(red: 0.18, green: 0.67, blue: 0.95)
     static let orange = Color(red: 1.0, green: 0.68, blue: 0.08)
     static let red = Color(red: 1.0, green: 0.31, blue: 0.22)
+    static let teal = Color(red: 0.25, green: 0.72, blue: 0.66)
     static let purple = Color(red: 0.66, green: 0.34, blue: 0.96)
 }
 

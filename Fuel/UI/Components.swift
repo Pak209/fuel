@@ -8,7 +8,10 @@ struct HealthScoreRing: View {
     var body: some View {
         ZStack {
             Circle().stroke(Color.white.opacity(0.1), style: StrokeStyle(lineWidth: 8, lineCap: .round))
-            Circle().trim(from: 0, to: Double(animatedScore) / 100).stroke(AngularGradient(colors: [FuelTheme.green, FuelTheme.green, FuelTheme.orange, FuelTheme.red], center: .center), style: StrokeStyle(lineWidth: 8, lineCap: .round)).rotationEffect(.degrees(-90))
+            // A single solid stroke: a green→orange→red sweep would encode the
+            // score as a judgment scale, which contradicts the app's
+            // adherence-neutral stance. Progress is shown by arc length only.
+            Circle().trim(from: 0, to: Double(animatedScore) / 100).stroke(FuelTheme.green, style: StrokeStyle(lineWidth: 8, lineCap: .round)).rotationEffect(.degrees(-90))
             Image(systemName: "heart.fill").font(.system(size: 28)).foregroundStyle(FuelTheme.green).overlay(Image(systemName: "waveform.path.ecg").font(.system(size: 17, weight: .bold)).foregroundStyle(.white))
         }
         .padding(5)
@@ -34,7 +37,7 @@ struct HealthScoreRing: View {
 struct NutrientProgressRow: View {
     let category: HealthScoreCategory
     let score: Int?
-    private var color: Color { switch category { case .nutrition, .protein: FuelTheme.green; case .hydration: FuelTheme.blue; case .fiber: FuelTheme.red; case .recovery: FuelTheme.purple } }
+    private var color: Color { switch category { case .nutrition, .protein: FuelTheme.green; case .hydration: FuelTheme.blue; case .fiber: FuelTheme.teal; case .recovery: FuelTheme.purple } }
     private var icon: String { switch category { case .nutrition: "apple.logo"; case .protein: "figure.strengthtraining.traditional"; case .hydration: "drop"; case .fiber: "leaf"; case .recovery: "moon" } }
     var body: some View {
         HStack(spacing: 5) {
@@ -65,6 +68,12 @@ struct MetricCard: View {
     let detail: String
     let color: Color
     let progress: Double?
+    /// True when `detail` is a "no data" placeholder rather than a real value.
+    /// Placeholders render in the secondary color so an absent source never
+    /// reads as a celebratory (green) result.
+    var isPlaceholder = false
+
+    private var detailColor: Color { isPlaceholder ? FuelTheme.secondary : color }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
@@ -74,11 +83,11 @@ struct MetricCard: View {
                 Text(value).font(.system(size: 18, weight: .bold, design: .rounded)).minimumScaleFactor(0.6).lineLimit(1)
             }
             ViewThatFits(in: .horizontal) {
-                Text(detail).font(.system(size: 10, weight: .semibold)).foregroundStyle(color).lineLimit(1)
-                Text(detail).font(.system(size: 10, weight: .semibold)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.6)
+                Text(detail).font(.system(size: 10, weight: .semibold)).foregroundStyle(detailColor).lineLimit(1)
+                Text(detail).font(.system(size: 10, weight: .semibold)).foregroundStyle(detailColor).lineLimit(1).minimumScaleFactor(0.6)
             }
             if let progress {
-                ProgressView(value: min(1, max(0, progress))).tint(color).scaleEffect(x: 1, y: 0.7)
+                ProgressView(value: min(1, max(0, progress))).tint(detailColor).scaleEffect(x: 1, y: 0.7)
             } else {
                 Capsule().fill(Color.white.opacity(0.08)).frame(height: 3)
             }
@@ -87,6 +96,63 @@ struct MetricCard: View {
         .cardStyle(padding: 9)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("\(title), \(value), \(detail)")
+    }
+}
+
+/// Today's hero: the number people open the app for.
+///
+/// Copy stays additive and non-shaming — once logged energy reaches the
+/// configured target the card switches from "left" to a neutral "logged"
+/// statement instead of counting anything as "over".
+struct CaloriesHeroCard: View {
+    let balance: CalorieBalance
+
+    private var remaining: Int { balance.estimatedRemaining }
+    private var hasRemaining: Bool { remaining > 0 }
+    private var headlineValue: Int { hasRemaining ? remaining : balance.consumedCalories }
+    private var headlineUnit: String { hasRemaining ? "left" : "logged" }
+    private var progress: Double {
+        min(1, max(0, Double(balance.consumedCalories) / Double(max(1, balance.targetCalories))))
+    }
+    private var equation: String {
+        hasRemaining
+            ? "\(balance.targetCalories.formatted()) target − \(balance.consumedCalories.formatted()) logged = \(remaining.formatted()) left"
+            : "\(balance.targetCalories.formatted()) target · \(balance.consumedCalories.formatted()) logged today"
+    }
+    /// The same arithmetic in words: VoiceOver reads "−" and "·" unreliably.
+    private var spokenEquation: String {
+        hasRemaining
+            ? "\(balance.targetCalories.formatted()) calorie target minus \(balance.consumedCalories.formatted()) logged leaves \(remaining.formatted())"
+            : "\(balance.consumedCalories.formatted()) logged of a \(balance.targetCalories.formatted()) calorie target"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Calories", systemImage: "flame.fill")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(FuelTheme.secondary)
+            HStack(alignment: .firstTextBaseline, spacing: 6) {
+                Text(headlineValue.formatted())
+                    .font(.system(.largeTitle, design: .rounded, weight: .bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                Text(headlineUnit)
+                    .font(.system(.title3, design: .rounded, weight: .semibold))
+                    .foregroundStyle(FuelTheme.secondary)
+            }
+            ProgressView(value: progress)
+                .tint(FuelTheme.green)
+                .accessibilityHidden(true)
+            Text(equation)
+                .font(.caption)
+                .foregroundStyle(FuelTheme.secondary)
+                .lineLimit(2)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .cardStyle(padding: 14)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Calories, \(headlineValue.formatted()) \(headlineUnit). \(spokenEquation).")
     }
 }
 

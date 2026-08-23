@@ -15,7 +15,7 @@ struct OnboardingView: View {
     @State private var errorMessage: String?
 
     private let activityLevels = ["Sedentary", "Lightly active", "Moderately active", "Very active"]
-    private let totalSteps = 8
+    private let totalSteps = 7
 
     init(state: AppState) {
         self.state = state
@@ -23,9 +23,16 @@ struct OnboardingView: View {
         let requestedStep = arguments.firstIndex(of: "-FuelOnboardingStep")
             .flatMap { arguments.indices.contains($0 + 1) ? Int(arguments[$0 + 1]) : nil }
             ?? 0
-        _step = State(initialValue: min(max(requestedStep, 0), 7))
+        _step = State(initialValue: min(max(requestedStep, 0), 6))
         _profile = State(initialValue: state.profile)
-        _preferences = State(initialValue: state.preferences)
+        // Seed the unit-system control from the device locale only when there's no
+        // persisted choice yet (the value still sits at `UserPreferences`' built-in
+        // default) so an already-saved preference is never silently overwritten.
+        var initialPreferences = state.preferences
+        if initialPreferences.unitSystem == UserPreferences().unitSystem {
+            initialPreferences.unitSystem = Locale.current.measurementSystem == .us ? .imperial : .metric
+        }
+        _preferences = State(initialValue: initialPreferences)
         _targets = State(initialValue: state.targets)
         _allergiesText = State(initialValue: state.profile.allergies.joined(separator: ", "))
         _avoidedFoodsText = State(initialValue: state.profile.foodsToAvoid.joined(separator: ", "))
@@ -79,12 +86,15 @@ struct OnboardingView: View {
     }
 
     private var continueButton: some View {
-        Button(step == totalSteps - 1 ? (isSaving ? "Saving…" : "Finish") : "Continue") {
+        Button {
             if step == totalSteps - 1 { finish() }
             else { advance() }
+        } label: {
+            Text(step == totalSteps - 1 ? (isSaving ? "Saving…" : "Finish") : "Continue")
+                .frame(maxWidth: .infinity, minHeight: 44)
         }
         .buttonStyle(.borderedProminent)
-        .frame(maxWidth: .infinity, minHeight: 44)
+        .controlSize(.large)
         .disabled(isSaving || (step == 1 && profile.firstName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty))
         .accessibilityIdentifier("onboardingContinue")
     }
@@ -93,12 +103,11 @@ struct OnboardingView: View {
     private var onboardingStep: some View {
         switch step {
         case 0: WelcomeStep()
-        case 1: ProfileStep(profile: $profile, preferences: preferences)
+        case 1: ProfileStep(profile: $profile, preferences: $preferences)
         case 2: GoalStep(profile: $profile, activityLevels: activityLevels)
         case 3: DietaryStep(profile: $profile, allergiesText: $allergiesText, avoidedFoodsText: $avoidedFoodsText)
-        case 4: UnitStep(preferences: $preferences)
-        case 5: TargetStep(targets: $targets, explanation: targetExplanation)
-        case 6: HealthStep(state: state)
+        case 4: TargetStep(targets: $targets, explanation: targetExplanation)
+        case 5: HealthStep(state: state)
         default: ReminderStep(preferences: $preferences)
         }
     }
@@ -106,7 +115,7 @@ struct OnboardingView: View {
     private func advance() {
         profile.allergies = parseList(allergiesText)
         profile.foodsToAvoid = parseList(avoidedFoodsText)
-        if step == 4 {
+        if step == 3 {
             let result = state.goalCalculationService.calculate(profile: profile)
             targets = result.targets
             targetExplanation = result.explanation + " " + result.assumptions.joined(separator: " ")
@@ -158,11 +167,21 @@ private struct WelcomeStep: View {
 
 private struct ProfileStep: View {
     @Binding var profile: UserProfile
-    let preferences: UserPreferences
+    @Binding var preferences: UserPreferences
 
     var body: some View {
         OnboardingPage(icon: "person.crop.circle", title: "About you") {
             VStack(spacing: 16) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Picker("Unit system", selection: $preferences.unitSystem) {
+                        Text("Metric").tag(UnitSystem.metric)
+                        Text("US / Imperial").tag(UnitSystem.imperial)
+                    }
+                    .pickerStyle(.segmented)
+                    Text("Fuel stores measurements in metric base units and converts them for display, so switching later does not change your underlying data.")
+                        .font(.footnote)
+                        .foregroundStyle(FuelTheme.secondary)
+                }
                 TextField("First name", text: $profile.firstName)
                     .textFieldStyle(.roundedBorder)
                 TextField("Age range (optional)", text: $profile.ageRange)
@@ -200,14 +219,22 @@ private struct GoalStep: View {
     var body: some View {
         OnboardingPage(icon: "target", title: "Choose your direction") {
             VStack(spacing: 16) {
-                Picker("Primary goal", selection: $profile.goal) {
-                    ForEach(UserGoal.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                LabeledContent("Primary goal") {
+                    Picker("Primary goal", selection: $profile.goal) {
+                        ForEach(UserGoal.allCases, id: \.self) { Text($0.rawValue).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
                 }
-                .pickerStyle(.menu)
-                Picker("Usual activity", selection: $profile.activityLevel) {
-                    ForEach(activityLevels, id: \.self) { Text($0).tag($0) }
+                .cardStyle(padding: 12)
+                LabeledContent("Usual activity") {
+                    Picker("Usual activity", selection: $profile.activityLevel) {
+                        ForEach(activityLevels, id: \.self) { Text($0).tag($0) }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
                 }
-                .pickerStyle(.menu)
+                .cardStyle(padding: 12)
                 Text("Fuel uses conservative defaults. Gradual weight goals never create an aggressive deficit, and every target can be changed before saving.")
                     .font(.footnote)
                     .foregroundStyle(FuelTheme.secondary)
@@ -245,23 +272,6 @@ private struct DietaryStep: View {
                     .font(.footnote)
                     .foregroundStyle(FuelTheme.secondary)
             }
-        }
-    }
-}
-
-private struct UnitStep: View {
-    @Binding var preferences: UserPreferences
-
-    var body: some View {
-        OnboardingPage(icon: "ruler", title: "Choose your units") {
-            Picker("Unit system", selection: $preferences.unitSystem) {
-                Text("Metric").tag(UnitSystem.metric)
-                Text("US / Imperial").tag(UnitSystem.imperial)
-            }
-            .pickerStyle(.segmented)
-            Text("Fuel stores measurements in metric base units and converts them for display, so switching later does not change your underlying data.")
-                .font(.footnote)
-                .foregroundStyle(FuelTheme.secondary)
         }
     }
 }
