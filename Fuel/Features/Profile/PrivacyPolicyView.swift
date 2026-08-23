@@ -80,6 +80,12 @@ struct PrivacyPolicyView: View {
                     }
                 }
             }
+            Section {
+                Link("View this policy online",
+                     destination: URL(string: "https://pak209.github.io/fuel/legal/privacy-policy.html")!)
+            } footer: {
+                Text("The online copy is identical to this one.")
+            }
         }
         .navigationTitle("Privacy Policy")
         .navigationBarTitleDisplayMode(.inline)
