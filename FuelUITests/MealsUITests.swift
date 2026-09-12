@@ -31,7 +31,7 @@ final class MealsUITests: XCTestCase {
             throw XCTSkip("mealEditorName field did not appear after tapping mealsAddButton.")
         }
         UITestSupport.clearAndType(nameField, text: originalName)
-        app.buttons["mealEditorSave"].tap()
+        UITestSupport.saveMealEditor(app: app)
 
         let createdRow = UITestSupport.rowMatching(originalName, in: app)
         XCTAssertTrue(
@@ -44,7 +44,7 @@ final class MealsUITests: XCTestCase {
         let editNameField = app.textFields["mealEditorName"]
         XCTAssertTrue(editNameField.waitForExistence(timeout: UITestSupport.timeout))
         UITestSupport.clearAndType(editNameField, text: updatedName)
-        app.buttons["mealEditorSave"].tap()
+        UITestSupport.saveMealEditor(app: app)
 
         let updatedRow = UITestSupport.rowMatching(updatedName, in: app)
         XCTAssertTrue(
@@ -104,7 +104,7 @@ final class MealsUITests: XCTestCase {
                 throw XCTSkip("mealEditorName field did not appear after tapping mealsAddButton.")
             }
             UITestSupport.clearAndType(nameField, text: name)
-            app.buttons["mealEditorSave"].tap()
+            UITestSupport.saveMealEditor(app: app)
             XCTAssertTrue(UITestSupport.rowMatching(name, in: app).waitForExistence(timeout: UITestSupport.timeout))
         }
 
@@ -126,17 +126,8 @@ final class MealsUITests: XCTestCase {
         XCTAssertFalse(UITestSupport.rowMatching(nameB, in: app).exists)
 
         // ...and switching to "All" should bring them both back, proving the filter control
-        // actually changes what mealsList shows rather than being cosmetic. "All" is the last
-        // item in the horizontally-scrolling filter menu, so it can start out past the right
-        // edge of the screen. Swipe the menu *container* (not a small button, which only
-        // drags within its own tiny frame, and not `allFilter.isHittable`, which itself
-        // throws a test failure when the element's activation point is off-screen) to bring
-        // it into view before tapping.
-        let filterMenuContainer: XCUIElement = app.scrollViews["mealsFilterMenu"].exists
-            ? app.scrollViews["mealsFilterMenu"]
-            : app.otherElements["mealsFilterMenu"]
-        filterMenuContainer.swipeLeft()
-
+        // actually changes what mealsList shows rather than being cosmetic. "All" is kept at
+        // the leading edge of the filter strip so the broad reset is always available.
         let allFilter = app.buttons["All"]
         XCTAssertTrue(allFilter.waitForExistence(timeout: UITestSupport.timeout))
         UITestSupport.tapAllowingOverlay(allFilter)

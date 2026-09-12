@@ -7,9 +7,9 @@ import XCTest
 /// - `completeOnboarding` wipes local data and then marks onboarding complete with a
 ///   default profile, so the tab bar and its features are reachable immediately.
 ///
-/// If the app hasn't implemented these yet, tests that depend on them skip themselves
-/// via `UITestSupport.requireFreshOnboarding` / `requireCompletedOnboarding` rather than
-/// failing red, so the suite stays honest about what it could actually verify.
+/// These arguments are part of the app's test contract. A missing destination is a test
+/// failure: silently skipping would allow the suite to report green without exercising
+/// the product flows it exists to verify.
 enum UITestLaunchArgument {
     static let reset = "--uitest-reset"
     static let completeOnboarding = "--uitest-complete-onboarding"
@@ -30,25 +30,21 @@ enum UITestSupport {
     }
 
     /// Confirms `--uitest-reset` actually produced the fresh onboarding screen it promises.
-    /// Skips (rather than fails) when the app doesn't yet honor the argument, since wiring
-    /// it up is being done concurrently by another agent.
     static func requireFreshOnboarding(app: XCUIApplication) throws {
         guard app.buttons["onboardingContinue"].waitForExistence(timeout: timeout) else {
-            throw XCTSkip(
+            throw UITestContractError.missingDestination(
                 "'\(UITestLaunchArgument.reset)' did not surface onboarding (onboardingContinue "
-                    + "missing). The launch-argument interface pin is not wired up in the app yet."
+                    + "missing)."
             )
         }
     }
 
     /// Confirms `--uitest-complete-onboarding` actually landed on the Today tab it promises.
-    /// Skips (rather than fails) when the app doesn't yet honor the argument.
     static func requireCompletedOnboarding(app: XCUIApplication) throws {
         guard app.buttons["todayAddWaterButton"].waitForExistence(timeout: timeout) else {
-            throw XCTSkip(
+            throw UITestContractError.missingDestination(
                 "'\(UITestLaunchArgument.completeOnboarding)' did not surface the Today tab "
-                    + "(todayAddWaterButton missing). The launch-argument interface pin is not "
-                    + "wired up in the app yet."
+                    + "(todayAddWaterButton missing)."
             )
         }
     }
@@ -58,29 +54,41 @@ enum UITestSupport {
         if tab.waitForExistence(timeout: shortTimeout) { tab.tap() }
     }
 
-    /// Clears an existing value in a text field and types new text into it.
-    ///
-    /// A plain `tap()` on a field with existing content does not reliably place the cursor at
-    /// the end — it can land mid-string — so backspacing exactly `stringValue.count` times can
-    /// leave a leftover tail sitting in front of the cursor (the iOS software keyboard also has
-    /// no arrow keys, so nudging the cursor via `typeText` doesn't work either). Tapping near
-    /// the field's trailing edge instead reliably places the cursor at the end of the existing
-    /// text, so the backspaces that follow clear the whole thing.
+    static func saveMealEditor(app: XCUIApplication) {
+        let save = app.buttons["mealEditorSave"]
+        XCTAssertTrue(save.isEnabled, "Expected a valid meal to be ready to save")
+        save.tap()
+        let dismissed = XCTNSPredicateExpectation(
+            predicate: NSPredicate(format: "exists == false"),
+            object: app.textFields["mealEditorName"]
+        )
+        XCTAssertEqual(
+            XCTWaiter.wait(for: [dismissed], timeout: timeout), .completed,
+            "Saving must finish and dismiss the editor before interacting with meal rows"
+        )
+    }
+
+    /// Clears an existing value in a text field and types new text into it. Command-A is more
+    /// reliable than synthesizing a long backspace sequence and also avoids treating placeholder
+    /// text as editable content. A normal center tap is used because trailing-edge coordinate
+    /// taps do not consistently grant keyboard focus on every supported simulator runtime.
     static func clearAndType(_ field: XCUIElement, text: String) {
-        field.coordinate(withNormalizedOffset: CGVector(dx: 0.95, dy: 0.5)).tap()
-        if let stringValue = field.value as? String, !stringValue.isEmpty {
-            let deleteString = String(repeating: XCUIKeyboardKey.delete.rawValue, count: stringValue.count + 5)
-            field.typeText(deleteString)
+        field.tap()
+        let keyboard = XCUIApplication().keyboards.firstMatch
+        XCTAssertTrue(keyboard.waitForExistence(timeout: shortTimeout), "Expected text field to receive keyboard focus")
+        if let stringValue = field.value as? String,
+           !stringValue.isEmpty,
+           stringValue != "Meal name" {
+            field.typeKey("a", modifierFlags: .command)
         }
         field.typeText(text)
     }
 
-    /// Finds a meal (or hydration entry, etc.) row by matching any descendant element whose
-    /// accessibility label contains the given text. Rows in this app group their children into
-    /// a single accessibility element with a composed label, so this is more reliable than
-    /// assuming a specific element type (button vs. cell) for the row.
+    /// Finds the tappable row whose composed accessibility label contains the given text.
+    /// Meal rows expose both their button and several matching descendants; returning the
+    /// button avoids tapping a static-text child that cannot open the editor.
     static func rowMatching(_ text: String, in app: XCUIApplication) -> XCUIElement {
-        app.descendants(matching: .any)
+        app.buttons
             .matching(NSPredicate(format: "label CONTAINS[cd] %@", text))
             .firstMatch
     }
@@ -93,10 +101,17 @@ enum UITestSupport {
     /// even though a real finger tap works. A coordinate tap targets the element's frame
     /// directly and bypasses the hittability resolution.
     static func tapAllowingOverlay(_ element: XCUIElement) {
-        if element.isHittable {
-            element.tap()
-        } else {
-            element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+        XCTAssertTrue(element.waitForExistence(timeout: shortTimeout), "Expected control to exist before tapping")
+        element.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.5)).tap()
+    }
+}
+
+private enum UITestContractError: LocalizedError {
+    case missingDestination(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .missingDestination(let message): message
         }
     }
 }

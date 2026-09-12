@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import SwiftData
 import Testing
 @testable import Fuel
@@ -248,41 +249,250 @@ struct EngagementTests {
     @Test func appRouteIgnoresQueryParametersWhenMatchingTheWaterDeepLink() {
         #expect(AppRoute(url: URL(string: "fuel://today/water?add=250")!) == .addWater)
     }
+
+    @Test func notificationQuickAddRequiresTheExpectedActionCategoryAndReminderIdentifier() {
+        let isAuthorized = NotificationRouteCoordinator.authorizesQuickAddWater
+
+        #expect(isAuthorized(
+            NotificationRouteCoordinator.quickAddWaterAction,
+            NotificationRouteCoordinator.hydrationCategory,
+            "fuel.reminder.hydration.12"
+        ))
+        #expect(!isAuthorized(
+            NotificationRouteCoordinator.quickAddWaterAction,
+            "fuel.category.open",
+            "fuel.reminder.hydration.12"
+        ))
+        #expect(!isAuthorized(
+            NotificationRouteCoordinator.openAction,
+            NotificationRouteCoordinator.hydrationCategory,
+            "fuel.reminder.hydration.12"
+        ))
+        #expect(!isAuthorized(
+            NotificationRouteCoordinator.quickAddWaterAction,
+            NotificationRouteCoordinator.hydrationCategory,
+            "fuel.reminder.health.connection"
+        ))
+        #expect(!isAuthorized(
+            NotificationRouteCoordinator.quickAddWaterAction,
+            NotificationRouteCoordinator.hydrationCategory,
+            "fuel.reminder.hydration.not-an-hour"
+        ))
+        #expect(!isAuthorized(
+            NotificationRouteCoordinator.quickAddWaterAction,
+            NotificationRouteCoordinator.hydrationCategory,
+            "fuel.reminder.hydration.24"
+        ))
+    }
 }
 
-// MARK: - FuelSharedStore hydration queue (shared UserDefaults suite — serialized to avoid cross-test races)
+struct HydrationFileQueueTests {
+    private func temporaryDirectory() -> URL {
+        FileManager.default.temporaryDirectory.appendingPathComponent("FuelQueueTest-\(UUID().uuidString)")
+    }
+
+    @Test func simultaneousWritersPreserveEveryAcceptedCommandAfterReopening() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        DispatchQueue.concurrentPerform(iterations: 48) { index in
+            do {
+                let queue = SharedHydrationFileQueue(directory: directory)
+                _ = try queue.enqueue(amountMilliliters: 50 + index)
+            } catch { Issue.record(error) }
+        }
+        let saved = try SharedHydrationFileQueue(directory: directory).pending()
+        #expect(saved.count == 48)
+        #expect(Set(saved.map(\.id)).count == 48)
+        #expect(Set(saved.map(\.amountMilliliters)) == Set(50..<98))
+    }
+
+    @Test func concurrentAcknowledgementsNeverEraseNewEntries() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let queue = SharedHydrationFileQueue(directory: directory)
+        let old = try (0..<16).map { _ in try queue.enqueue(amountMilliliters: 100) }
+        DispatchQueue.concurrentPerform(iterations: 32) { index in
+            do {
+                let otherHandle = SharedHydrationFileQueue(directory: directory)
+                if index < 16 {
+                    try otherHandle.acknowledge(ids: [old[index].id])
+                } else {
+                    _ = try otherHandle.enqueue(amountMilliliters: 250)
+                }
+            } catch { Issue.record(error) }
+        }
+        let remaining = try queue.pending()
+        #expect(remaining.count == 16)
+        #expect(remaining.allSatisfy { $0.amountMilliliters == 250 })
+        #expect(Set(remaining.map(\.id)).isDisjoint(with: Set(old.map(\.id))))
+    }
+
+    @Test func concurrentWritersCannotExceedTheCapacity() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        DispatchQueue.concurrentPerform(iterations: 80) { _ in
+            do {
+                _ = try SharedHydrationFileQueue(directory: directory).enqueue(amountMilliliters: 50)
+            } catch SharedHydrationQueueError.queueFull {
+                // The extra writers must fail explicitly without overwriting accepted entries.
+            } catch { Issue.record(error) }
+        }
+        #expect(try SharedHydrationFileQueue(directory: directory).pending().count == 64)
+    }
+
+    @Test func migrationKeepsIDsAndNeverReplaysStalePreferences() throws {
+        let directory = temporaryDirectory()
+        let suite = "FuelQueueMigrationTest-\(UUID().uuidString)"
+        let defaults = try #require(UserDefaults(suiteName: suite))
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            defaults.removePersistentDomain(forName: suite)
+        }
+        let old = PendingHydrationCommand(amountMilliliters: 250)
+        let data = try JSONEncoder().encode([old])
+        defaults.set(data, forKey: "engagement.hydration-queue.v1")
+        let queue = SharedHydrationFileQueue(directory: directory, legacyDefaultsSuite: suite)
+        #expect(try queue.pending() == [old])
+        try queue.acknowledge(ids: [old.id])
+        defaults.set(data, forKey: "engagement.hydration-queue.v1")
+        let reopened = SharedHydrationFileQueue(directory: directory, legacyDefaultsSuite: suite)
+        #expect(try reopened.pending().isEmpty)
+        try reopened.clear()
+        #expect(defaults.data(forKey: "engagement.hydration-queue.v1") == nil)
+    }
+
+    @Test func staleCorruptionRecoveryPreservesEntriesWrittenAfterRepair() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let queue = SharedHydrationFileQueue(directory: directory)
+        try queue.clear()
+        let dataURL = directory.appendingPathComponent("commands-v2.json")
+        try Data("broken".utf8).write(to: dataURL)
+        #expect(throws: SharedHydrationQueueError.self) { try queue.pending() }
+        #expect(try queue.repairIfCorrupt())
+        let command = try queue.enqueue(amountMilliliters: 250)
+        #expect(try !queue.repairIfCorrupt())
+        #expect(try queue.pending() == [command])
+    }
+
+    @Test func failedPersistenceNeverReportsAnAcceptedCommand() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        try Data("not a directory".utf8).write(to: directory)
+        let queue = SharedHydrationFileQueue(directory: directory)
+        #expect(throws: (any Error).self) { try queue.enqueue(amountMilliliters: 250) }
+        #expect(throws: (any Error).self) { try queue.clear() }
+        #expect(throws: (any Error).self) { try queue.repairIfCorrupt() }
+    }
+
+    @Test func occupiedLockTimesOutWithoutWritingAndCanBeRetried() throws {
+        let directory = temporaryDirectory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let queue = SharedHydrationFileQueue(directory: directory)
+        try queue.clear()
+        let descriptor = open(directory.appendingPathComponent("queue.lock").path, O_RDWR)
+        #expect(descriptor >= 0)
+        guard descriptor >= 0 else { return }
+        defer { close(descriptor) }
+        #expect(flock(descriptor, LOCK_EX | LOCK_NB) == 0)
+        let start = ProcessInfo.processInfo.systemUptime
+        #expect(throws: SharedHydrationQueueError.queueBusy) {
+            try queue.enqueue(amountMilliliters: 250)
+        }
+        #expect(ProcessInfo.processInfo.systemUptime - start < 2)
+        #expect(flock(descriptor, LOCK_UN) == 0)
+        #expect(try queue.pending().isEmpty)
+        _ = try queue.enqueue(amountMilliliters: 250)
+        #expect(try queue.pending().count == 1)
+    }
+}
+
+// MARK: - Shared app-group store integration (serialized to avoid cross-test resets)
 
 @Suite(.serialized)
 struct EngagementSharedStoreTests {
-    @Test func hydrationQueueEnqueueThenDrainReturnsTheCommandOnceAndEmpties() {
-        FuelSharedStore.clearEngagementData()
-        let command = FuelSharedStore.enqueueHydration(amountMilliliters: 300)
+    @Test func hydrationQueueEnqueueThenDrainReturnsTheCommandOnceAndEmpties() throws {
+        try FuelSharedStore.clearEngagementData()
+        let command = try FuelSharedStore.enqueueHydration(amountMilliliters: 300)
 
-        let drained = drainHydrationCommands()
+        let drained = try drainHydrationCommands()
 
         #expect(drained.map(\.id) == [command.id])
         #expect(drained.first?.amountMilliliters == 300)
-        #expect(FuelSharedStore.pendingHydrationCommands().isEmpty)
-        FuelSharedStore.clearEngagementData()
+        #expect(try FuelSharedStore.pendingHydrationCommands().isEmpty)
+        try FuelSharedStore.clearEngagementData()
     }
 
-    @Test func hydrationQueueDrainOnAnEmptyQueueIsANoOp() {
-        FuelSharedStore.clearEngagementData()
-        #expect(drainHydrationCommands().isEmpty)
-        #expect(FuelSharedStore.pendingHydrationCommands().isEmpty)
+    @Test func hydrationQueueDrainOnAnEmptyQueueIsANoOp() throws {
+        try FuelSharedStore.clearEngagementData()
+        #expect(try drainHydrationCommands().isEmpty)
+        #expect(try FuelSharedStore.pendingHydrationCommands().isEmpty)
     }
 
-    @Test func hydrationQueueEnqueueAccumulatesIntoTheSharedSummary() {
-        FuelSharedStore.clearEngagementData()
-        _ = FuelSharedStore.enqueueHydration(amountMilliliters: 200)
-        _ = FuelSharedStore.enqueueHydration(amountMilliliters: 150)
+    @Test func hydrationQueueEnqueueAccumulatesIntoTheSharedSummary() throws {
+        try FuelSharedStore.clearEngagementData()
+        _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 200)
+        _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 150)
 
         #expect(FuelSharedStore.loadSummary().hydrationMilliliters == 350)
-        FuelSharedStore.clearEngagementData()
+        try FuelSharedStore.clearEngagementData()
     }
 
-    @Test func consumeRouteReturnsTheEnqueuedURLOnceThenNil() {
-        FuelSharedStore.clearEngagementData()
+    @Test func hydrationQueueRejectsInvalidAmountsAndCapacityOverflowWithoutChangingSummary() throws {
+        try FuelSharedStore.clearEngagementData()
+        #expect(throws: SharedHydrationQueueError.self) {
+            _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 49)
+        }
+        #expect(throws: SharedHydrationQueueError.self) {
+            _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 2_001)
+        }
+        for _ in 0..<FuelSharedStore.maximumPendingHydrationCommands {
+            _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 50)
+        }
+        let before = FuelSharedStore.loadSummary()
+        #expect(throws: SharedHydrationQueueError.self) {
+            _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 50)
+        }
+        #expect(FuelSharedStore.loadSummary() == before)
+        try FuelSharedStore.clearEngagementData()
+    }
+
+    @Test func corruptSummaryArithmeticCannotOverflowDuringAValidEnqueue() throws {
+        try FuelSharedStore.clearEngagementData()
+        FuelSharedStore.saveSummary(.init(
+            healthScore: nil,
+            caloriesRemaining: 0,
+            proteinRemainingGrams: 0,
+            hydrationMilliliters: .max,
+            hydrationTargetMilliliters: 2_000,
+            lastUpdated: .now
+        ))
+        _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 250)
+        #expect(FuelSharedStore.loadSummary().hydrationMilliliters == 250)
+        try FuelSharedStore.clearEngagementData()
+    }
+
+    @Test @MainActor func appLoadDrainsMoreThanOneBatchWithoutStrandingCommands() async throws {
+        try FuelSharedStore.clearEngagementData()
+        defer { try? FuelSharedStore.clearEngagementData() }
+        for _ in 0..<(FuelSharedStore.hydrationDrainBatchSize + 1) {
+            _ = try FuelSharedStore.enqueueHydration(amountMilliliters: 50)
+        }
+        let container = try makeInMemoryContainer()
+        let state = AppState(healthService: MockHealthDataService())
+        state.configure(context: container.mainContext)
+
+        await state.loadInitialData()
+
+        #expect(try FuelSharedStore.pendingHydrationCommands().isEmpty)
+        let entries = try container.mainContext.fetch(FetchDescriptor<HydrationEntry>())
+        #expect(entries.count == FuelSharedStore.hydrationDrainBatchSize + 1)
+        #expect(entries.reduce(0) { $0 + Int($1.amountMilliliters) } == 850)
+        #expect(FuelSharedStore.loadSummary().hydrationMilliliters == 850)
+    }
+
+    @Test func consumeRouteReturnsTheEnqueuedURLOnceThenNil() throws {
+        try FuelSharedStore.clearEngagementData()
         #expect(FuelSharedStore.consumeRoute() == nil)
 
         let url = URL(string: "fuel://scan")!
@@ -294,9 +504,9 @@ struct EngagementSharedStoreTests {
 
     /// `FuelSharedStore` has no single atomic "drain" call; the production hydration-sync path reads
     /// `pendingHydrationCommands()` and then acknowledges the ids it processed. This mirrors that pairing.
-    private func drainHydrationCommands() -> [PendingHydrationCommand] {
-        let commands = FuelSharedStore.pendingHydrationCommands()
-        FuelSharedStore.acknowledgeHydrationCommands(ids: Set(commands.map(\.id)))
+    private func drainHydrationCommands() throws -> [PendingHydrationCommand] {
+        let commands = try FuelSharedStore.pendingHydrationCommands()
+        try FuelSharedStore.acknowledgeHydrationCommands(ids: Set(commands.map(\.id)))
         return commands
     }
 }
@@ -313,11 +523,48 @@ private func makeInMemoryContainer() throws -> ModelContainer {
 }
 
 struct EngagementOfflineQueueTests {
+    @Test @MainActor func publicWaterRoutesNavigateWithoutMutatingHydration() async throws {
+        let container = try makeInMemoryContainer()
+        let state = AppState(healthService: MockHealthDataService())
+        state.configure(context: container.mainContext)
+        let urls = [
+            "fuel://today/water",
+            "fuel://today/water?add",
+            "fuel://today/water?add=0",
+            "fuel://today/water?add=bogus",
+            "FUEL://TODAY/WATER?add=250",
+            "fuel:///today/water?%61dd=250"
+        ]
+
+        for value in urls {
+            await state.handle(try #require(URL(string: value)))
+        }
+
+        let records = try container.mainContext.fetch(FetchDescriptor<HydrationEntry>())
+        #expect(records.isEmpty)
+        #expect(state.selectedTab == .today)
+        #expect(state.presentedRoute == .addWater)
+    }
+
+    @Test @MainActor func trustedNotificationQuickAddPersistsExactlyTwoHundredFiftyMilliliters() async throws {
+        let container = try makeInMemoryContainer()
+        let state = AppState(healthService: MockHealthDataService())
+        state.configure(context: container.mainContext)
+
+        await state.handleNotificationQuickAddWater()
+
+        let records = try container.mainContext.fetch(FetchDescriptor<HydrationEntry>())
+        #expect(records.count == 1)
+        #expect(records.first?.amountMilliliters == 250)
+        #expect(state.selectedTab == .today)
+        #expect(state.presentedRoute == nil)
+    }
+
     @Test @MainActor func queueRecognitionCreatesADurablePendingRecordAndStoresThePhoto() async throws {
         let container = try makeInMemoryContainer()
         let repositories = LocalRepositoryContainer(context: container.mainContext)
         let coordinator = DailyDataCoordinator(repositories: repositories, healthService: MockHealthDataService())
-        let imageData = Data([10, 20, 30, 40])
+        let imageData = testMealImageData()
 
         let record = try await coordinator.queueRecognition(imageData: imageData)
 
@@ -335,7 +582,7 @@ struct EngagementOfflineQueueTests {
         let container = try makeInMemoryContainer()
         let repositories = LocalRepositoryContainer(context: container.mainContext)
         let coordinator = DailyDataCoordinator(repositories: repositories, healthService: MockHealthDataService())
-        let record = try await coordinator.queueRecognition(imageData: Data([1]))
+        let record = try await coordinator.queueRecognition(imageData: testMealImageData())
         let now = Date(timeIntervalSince1970: 1_700_000_000)
 
         try coordinator.markRecognitionFailed(record, error: EngagementTestError.simulated, now: now)
@@ -354,7 +601,7 @@ struct EngagementOfflineQueueTests {
         let container = try makeInMemoryContainer()
         let repositories = LocalRepositoryContainer(context: container.mainContext)
         let coordinator = DailyDataCoordinator(repositories: repositories, healthService: MockHealthDataService())
-        let record = try await coordinator.queueRecognition(imageData: Data([2]))
+        let record = try await coordinator.queueRecognition(imageData: testMealImageData())
 
         for _ in 0..<DailyDataCoordinator.maxRetryAttempts {
             try coordinator.markRecognitionFailed(record, error: EngagementTestError.simulated, now: .now)
@@ -388,7 +635,7 @@ struct EngagementOfflineQueueTests {
         let repositories = LocalRepositoryContainer(context: container.mainContext)
         let coordinator = DailyDataCoordinator(repositories: repositories, healthService: MockHealthDataService())
 
-        let record = try await coordinator.queueRecognition(imageData: Data([3]))
+        let record = try await coordinator.queueRecognition(imageData: testMealImageData())
         try coordinator.markRecognitionFailed(record, error: EngagementTestError.simulated, now: .now)
         try coordinator.markRecognitionProcessing(record)
         #expect(record.state == .processing)
@@ -425,5 +672,23 @@ struct EngagementOfflineQueueTests {
         #expect(firstEntry?.amountMilliliters == 250)
         #expect(secondEntry == nil)
         #expect(try repositories.hydration.allEntries().count == 1)
+    }
+
+    @Test @MainActor func hydrationCommandSinkRejectsInvalidAmountAndUnreasonableTimestamps() throws {
+        let container = try makeInMemoryContainer()
+        let repositories = LocalRepositoryContainer(context: container.mainContext)
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        let invalid = [
+            PendingHydrationCommand(amountMilliliters: 49, createdAt: now),
+            PendingHydrationCommand(amountMilliliters: 2_001, createdAt: now),
+            PendingHydrationCommand(amountMilliliters: 250, createdAt: now.addingTimeInterval(301)),
+            PendingHydrationCommand(amountMilliliters: 250, createdAt: now.addingTimeInterval(-31 * 24 * 60 * 60))
+        ]
+        for command in invalid {
+            #expect(throws: LocalDataError.self) {
+                _ = try repositories.consumeHydrationCommand(command, dayKey: "test-day", now: now)
+            }
+        }
+        #expect(try repositories.hydration.allEntries().isEmpty)
     }
 }

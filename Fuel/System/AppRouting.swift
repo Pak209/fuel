@@ -35,10 +35,19 @@ extension Notification.Name {
     static let fuelRouteRequested = Notification.Name("com.pak.fuel.routeRequested")
 }
 
+/// A notification response keeps its trust context until the app consumes it.
+/// Generic URLs are navigation-only; only a verified hydration action may write data.
+enum NotificationRouteRequest: Sendable {
+    case navigate(URL)
+    case quickAddWater
+}
+
 final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
     nonisolated static let deepLinkKey = "fuelDeepLink"
     nonisolated static let quickAddWaterAction = "fuel.action.addWater"
     nonisolated static let openAction = "fuel.action.open"
+    nonisolated static let hydrationCategory = "fuel.category.hydration"
+    nonisolated static let hydrationReminderPrefix = "fuel.reminder.hydration."
 
     func application(
         _ application: UIApplication,
@@ -67,7 +76,7 @@ final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUse
             completionHandler(false)
             return
         }
-        post(URL(string: "fuel://scan")!)
+        post(.navigate(URL(string: "fuel://scan")!))
         completionHandler(true)
     }
 
@@ -82,14 +91,34 @@ final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUse
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        if response.actionIdentifier == Self.quickAddWaterAction {
-            post(URL(string: "fuel://today/water?add=250")!)
+        let request = response.notification.request
+        if Self.authorizesQuickAddWater(
+            actionIdentifier: response.actionIdentifier,
+            categoryIdentifier: request.content.categoryIdentifier,
+            requestIdentifier: request.identifier
+        ) {
+            post(.quickAddWater)
             return
         }
-        if let value = response.notification.request.content.userInfo[Self.deepLinkKey] as? String,
+        if let value = request.content.userInfo[Self.deepLinkKey] as? String,
            let url = URL(string: value) {
-            post(url)
+            post(.navigate(url))
         }
+    }
+
+    /// The action identifier alone is not authority: bind the command to a
+    /// hydration reminder produced by Fuel so another category cannot reuse it.
+    nonisolated static func authorizesQuickAddWater(
+        actionIdentifier: String,
+        categoryIdentifier: String,
+        requestIdentifier: String
+    ) -> Bool {
+        guard actionIdentifier == quickAddWaterAction,
+              categoryIdentifier == hydrationCategory,
+              requestIdentifier.hasPrefix(hydrationReminderPrefix) else { return false }
+        let suffix = requestIdentifier.dropFirst(hydrationReminderPrefix.count)
+        guard let hour = Int(suffix), (0...23).contains(hour) else { return false }
+        return true
     }
 
     nonisolated static func categoryIdentifier(for kind: ReminderKind) -> String {
@@ -103,7 +132,7 @@ final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUse
         let open = UNNotificationAction(identifier: Self.openAction, title: "Open Fuel", options: [.foreground])
         let addWater = UNNotificationAction(identifier: Self.quickAddWaterAction, title: "Add 250 ml", options: [.foreground])
         let hydration = UNNotificationCategory(
-            identifier: "fuel.category.hydration",
+            identifier: Self.hydrationCategory,
             actions: [addWater, open],
             intentIdentifiers: [],
             options: []
@@ -117,9 +146,9 @@ final class NotificationRouteCoordinator: NSObject, UIApplicationDelegate, UNUse
         center.setNotificationCategories([hydration, defaultCategory])
     }
 
-    private func post(_ url: URL) {
+    private func post(_ request: NotificationRouteRequest) {
         Task { @MainActor in
-            NotificationCenter.default.post(name: .fuelRouteRequested, object: url)
+            NotificationCenter.default.post(name: .fuelRouteRequested, object: request)
         }
     }
 }

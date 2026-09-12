@@ -543,7 +543,6 @@ private struct TodayTimeline: View {
                     TimelineRow(icon: "drop", color: FuelTheme.blue, title: "Water", time: "All day", item: "\(hydrationMilliliters) ml", detail: "Tap to add 250 ml", complete: nil, showsAccessory: false)
                 }
                 .buttonStyle(.plain)
-                .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Water, \(hydrationMilliliters) milliliters logged today")
                 .accessibilityHint("Adds 250 milliliters")
                 .accessibilityIdentifier("todayAddWaterButton")

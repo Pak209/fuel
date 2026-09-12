@@ -11,6 +11,7 @@ import UniformTypeIdentifiers
 /// best-effort local convenience: failures are logged via `Observability`
 /// and never thrown to callers, since Spotlight visibility is not part of
 /// Fuel's data model and must never block a meal save/delete.
+@MainActor
 enum SpotlightIndexer {
     /// Shared domain identifier for every indexed meal, used to bulk-deindex
     /// everything in one call (e.g. when local data is wiped).
@@ -18,7 +19,7 @@ enum SpotlightIndexer {
 
     /// Indexes (or re-indexes) a single meal. Safe to call again for the same
     /// meal — CoreSpotlight replaces the existing item for the identifier.
-    static func index(meal: Meal) async {
+    static func index(meal: Meal) {
         let attributeSet = CSSearchableItemAttributeSet(contentType: .text)
         attributeSet.title = meal.name
         attributeSet.contentDescription = "\(meal.type.rawValue) logged on \(dateFormatter.string(from: meal.date))"
@@ -29,28 +30,30 @@ enum SpotlightIndexer {
             attributeSet: attributeSet
         )
 
-        do {
-            try await CSSearchableIndex.default().indexSearchableItems([item])
-        } catch {
-            Observability.log(error, category: .data, message: "Spotlight index(meal:) failed")
+        // Submit synchronously in main-actor mutation order, but do not make the
+        // editor wait for the system indexing service's completion callback.
+        CSSearchableIndex.default().indexSearchableItems([item]) { error in
+            if let error {
+                Observability.log(error, category: .data, message: "Spotlight index(meal:) failed")
+            }
         }
     }
 
     /// Removes a single meal from the index, e.g. after a meal is deleted.
-    static func deindex(mealID: UUID) async {
-        do {
-            try await CSSearchableIndex.default().deleteSearchableItems(withIdentifiers: [mealID.uuidString])
-        } catch {
-            Observability.log(error, category: .data, message: "Spotlight deindex(mealID:) failed")
+    static func deindex(mealID: UUID) {
+        CSSearchableIndex.default().deleteSearchableItems(withIdentifiers: [mealID.uuidString]) { error in
+            if let error {
+                Observability.log(error, category: .data, message: "Spotlight deindex(mealID:) failed")
+            }
         }
     }
 
     /// Removes every indexed meal, e.g. when the user deletes all local data.
-    static func deindexAll() async {
-        do {
-            try await CSSearchableIndex.default().deleteSearchableItems(withDomainIdentifiers: [mealsDomainIdentifier])
-        } catch {
-            Observability.log(error, category: .data, message: "Spotlight deindexAll() failed")
+    static func deindexAll() {
+        CSSearchableIndex.default().deleteSearchableItems(withDomainIdentifiers: [mealsDomainIdentifier]) { error in
+            if let error {
+                Observability.log(error, category: .data, message: "Spotlight deindexAll() failed")
+            }
         }
     }
 

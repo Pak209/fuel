@@ -217,8 +217,10 @@ struct PrivacySafetyTests {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
         defer { try? FileManager.default.removeItem(at: directory) }
         let store = LocalMealPhotoStore(directory: directory)
-        let referenced = try await store.save(Data([1, 2, 3]), id: UUID())
-        let orphan = try await store.save(Data([4, 5, 6]), id: UUID())
+        let referencedData = testMealImageData(color: .green)
+        let orphanData = testMealImageData(color: .orange)
+        let referenced = try await store.save(referencedData, id: UUID())
+        let orphan = try await store.save(orphanData, id: UUID())
 
         // Freshly written files are inside the grace period, so the default sweep is a no-op.
         let untouched = try await DailyDataCoordinator.purgeOrphanedPhotos(in: store, referencedFileNames: [referenced])
@@ -231,7 +233,7 @@ struct PrivacySafetyTests {
 
         let remaining = try await store.storedPhotos()
         #expect(remaining.map(\.fileName) == [referenced])
-        #expect(try await store.load(fileName: referenced) == Data([1, 2, 3]))
+        #expect(try await store.load(fileName: referenced) == referencedData)
     }
 
     @Test @MainActor func purgeIsSafeOnAnEmptyStore() async throws {
@@ -240,6 +242,55 @@ struct PrivacySafetyTests {
         let store = LocalMealPhotoStore(directory: directory)
         let removed = try await DailyDataCoordinator.purgeOrphanedPhotos(in: store, referencedFileNames: [], retention: 0)
         #expect(removed.isEmpty)
+    }
+
+    @Test @MainActor func deletingAMealQuarantinesItsPhotoAndUndoRestoresItBeforeFinalErasure() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalMealPhotoStore(directory: directory)
+        let schema = Schema(versionedSchema: FuelSchemaV3.self)
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [ModelConfiguration(schema: schema, isStoredInMemoryOnly: true)]
+        )
+        let repositories = LocalRepositoryContainer(context: container.mainContext)
+        let coordinator = DailyDataCoordinator(
+            repositories: repositories,
+            healthService: MockHealthDataService(),
+            mealPhotoStore: store
+        )
+        let source = testMealImageData()
+        let meal = try await coordinator.saveMeal(.init(
+            name: "Photo meal",
+            type: .lunch,
+            date: .now,
+            nutrition: .zero,
+            items: [],
+            provenance: .userEntered,
+            confidence: nil,
+            imageData: source
+        ))
+        let fileName = try #require(meal.imageFileName)
+
+        try await coordinator.deleteMeal(meal)
+        #expect(try await store.stagedPhotos().map(\.fileName) == [fileName])
+        do {
+            _ = try await store.load(fileName: fileName)
+            Issue.record("A deleted meal photo must leave active storage immediately")
+        } catch {}
+
+        try await coordinator.restoreMeal(meal)
+        #expect(try await store.load(fileName: fileName) == source)
+        #expect(try await store.stagedPhotos().isEmpty)
+
+        try await coordinator.deleteMeal(meal)
+        let removed = try await DailyDataCoordinator.purgeStagedPhotos(
+            in: store,
+            retention: 0,
+            now: .now.addingTimeInterval(1)
+        )
+        #expect(removed == [fileName])
+        #expect(try await store.stagedPhotos().isEmpty)
     }
 
     // MARK: - Helpers

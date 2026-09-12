@@ -169,7 +169,9 @@ struct AppRootView: View {
     @Bindable var state: AppState
 
     var body: some View {
-        rootContent
+        ZStack {
+            rootContent
+        }
         .toolbarBackground(.visible, for: .tabBar)
         .toolbarBackground(FuelTheme.panel, for: .tabBar)
         .task {
@@ -177,8 +179,9 @@ struct AppRootView: View {
             await state.loadInitialData()
         }
         .onChange(of: scenePhase) { _, phase in
-            guard phase == .active, state.isConfigured else { return }
+            guard phase == .active, state.isConfigured, state.dataPhase == .loaded else { return }
             Task {
+                await state.cleanupExpiredExports()
                 await state.refresh()
                 await state.consumeSharedRoute()
             }
@@ -187,8 +190,13 @@ struct AppRootView: View {
             Task { await state.handle(url) }
         }
         .onReceive(NotificationCenter.default.publisher(for: .fuelRouteRequested)) { note in
-            guard let url = note.object as? URL else { return }
-            Task { await state.handle(url) }
+            guard let request = note.object as? NotificationRouteRequest else { return }
+            Task {
+                switch request {
+                case .navigate(let url): await state.handle(url)
+                case .quickAddWater: await state.handleNotificationQuickAddWater()
+                }
+            }
         }
         .sheet(item: $state.presentedRoute) { route in
             NavigationStack {

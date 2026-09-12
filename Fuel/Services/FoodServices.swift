@@ -352,15 +352,22 @@ protocol MealImageProcessing {
 struct MealImageProcessor: MealImageProcessing {
     var maximumDimension: CGFloat = 1_600
     var compressionQuality: CGFloat = 0.82
+    var maximumSourceBytes = 32_000_000
 
     func prepareForRecognition(_ data: Data) async throws -> Data {
-        guard let image = UIImage(data: data) else { throw FoodServiceError.invalidImage }
-        let longest = max(image.size.width, image.size.height)
-        let scale = min(1, maximumDimension / max(longest, 1))
-        let size = CGSize(width: image.size.width * scale, height: image.size.height * scale)
-        let renderer = UIGraphicsImageRenderer(size: size)
-        let rendered = renderer.image { _ in image.draw(in: CGRect(origin: .zero, size: size)) }
-        guard let output = rendered.jpegData(compressionQuality: compressionQuality) else { throw FoodServiceError.invalidImage }
+        guard MealImageValidator.isValid(data, maximumBytes: maximumSourceBytes),
+              let source = CGImageSourceCreateWithData(data as CFData, [
+                kCGImageSourceShouldCache: false
+              ] as CFDictionary),
+              let thumbnail = CGImageSourceCreateThumbnailAtIndex(source, 0, [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: maximumDimension,
+                kCGImageSourceCreateThumbnailWithTransform: true,
+                kCGImageSourceShouldCacheImmediately: true
+              ] as CFDictionary) else { throw FoodServiceError.invalidImage }
+        let rendered = UIImage(cgImage: thumbnail)
+        guard let output = rendered.jpegData(compressionQuality: compressionQuality),
+              MealImageValidator.isValid(output) else { throw FoodServiceError.invalidImage }
         return output
     }
 }
@@ -375,6 +382,7 @@ struct OnDeviceFoodRecognitionService: FoodRecognitionService {
 
     func analyze(imageData: Data) async throws -> FoodRecognitionResult {
         try Task.checkCancellation()
+        guard MealImageValidator.isValid(imageData) else { throw FoodServiceError.invalidImage }
         guard let source = CGImageSourceCreateWithData(imageData as CFData, nil),
               let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
                 kCGImageSourceCreateThumbnailFromImageAlways: true,

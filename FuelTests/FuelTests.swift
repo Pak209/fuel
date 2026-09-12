@@ -182,7 +182,7 @@ struct FuelTests {
 
     @Test @MainActor func appStateSaveRebuildsAuthoritativeSnapshot() async throws {
         let container = try makeContainer()
-        let state = AppState(healthService: MockHealthDataService())
+        let state = AppState(healthService: MockHealthDataService(), consumesSharedHydrationCommands: false)
         state.configure(context: container.mainContext)
         await state.loadInitialData()
         try await state.saveMeal(.init(name: "Test bowl", type: .lunch, date: .now, nutrition: .init(calories: 500, protein: 31, carbohydrates: 40, fat: 20, fiber: 8), items: [], provenance: .userEntered, confidence: nil, imageData: nil))
@@ -194,7 +194,7 @@ struct FuelTests {
 
     @Test @MainActor func appStateWaterEntryRebuildsSnapshot() async throws {
         let container = try makeContainer()
-        let state = AppState(healthService: MockHealthDataService())
+        let state = AppState(healthService: MockHealthDataService(), consumesSharedHydrationCommands: false)
         state.configure(context: container.mainContext)
         await state.loadInitialData()
         try await state.addWater(milliliters: 250)
@@ -205,7 +205,7 @@ struct FuelTests {
 
     @Test @MainActor func editingAMealRecalculatesTheSameDailySnapshot() async throws {
         let container = try makeContainer()
-        let state = AppState(healthService: MockHealthDataService())
+        let state = AppState(healthService: MockHealthDataService(), consumesSharedHydrationCommands: false)
         state.configure(context: container.mainContext)
         await state.loadInitialData()
         try await state.saveMeal(.init(name: "Original", type: .lunch, date: .now, nutrition: .init(calories: 400, protein: 20, carbohydrates: 40, fat: 15, fiber: 5), items: [], provenance: .userEntered, confidence: nil, imageData: nil))
@@ -219,8 +219,9 @@ struct FuelTests {
 
     @Test func localPhotoStoreRoundTripsAndDeletesProtectedData() async throws {
         let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
         let store = LocalMealPhotoStore(directory: directory)
-        let source = Data([1, 2, 3, 4])
+        let source = testMealImageData()
         let fileName = try await store.save(source, id: UUID())
         #expect(try await store.load(fileName: fileName) == source)
         try await store.delete(fileName: fileName)
@@ -228,6 +229,31 @@ struct FuelTests {
             _ = try await store.load(fileName: fileName)
             Issue.record("Expected the deleted photo to be unavailable")
         } catch {}
+    }
+
+    @Test func photoStoreAndRecognitionRejectArbitraryBinaryBeforePersistenceOrDecode() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = LocalMealPhotoStore(directory: directory)
+        let invalid = Data([1, 2, 3, 4])
+
+        do {
+            _ = try await store.save(invalid, id: UUID())
+            Issue.record("Expected arbitrary binary data to be rejected")
+        } catch MealPhotoStoreError.invalidImage {}
+        #expect(try await store.storedPhotos().isEmpty)
+
+        do {
+            _ = try await OnDeviceFoodRecognitionService().analyze(imageData: invalid)
+            Issue.record("Expected recognition to reject arbitrary binary data")
+        } catch FoodServiceError.invalidImage {}
+    }
+
+    @Test func imageMetadataLimitsRejectOversizedDimensionsAndPixelCounts() {
+        #expect(MealImageValidator.dimensionsAreSafe(width: 1_600, height: 1_200))
+        #expect(!MealImageValidator.dimensionsAreSafe(width: 20_001, height: 1))
+        #expect(!MealImageValidator.dimensionsAreSafe(width: 10_000, height: 6_001))
+        #expect(!MealImageValidator.dimensionsAreSafe(width: .infinity, height: 1))
     }
 
     @Test func mockRecognitionProducesTypedResult() async throws {
@@ -472,20 +498,49 @@ struct FuelTests {
             imageData: nil
         ))
         try coordinator.addWater(milliliters: 350, at: .now, timeZoneIdentifier: profile.timeZoneIdentifier)
-        let url = try await LocalDataExportService().write(coordinator.exportPayload(profile: profile, targets: targets, preferences: preferences))
-        defer { try? FileManager.default.removeItem(at: url) }
+        let artifact = try await LocalDataExportService().write(coordinator.exportPayload(profile: profile, targets: targets, preferences: preferences))
+        defer { try? FileManager.default.removeItem(at: artifact.url) }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
-        let decoded = try decoder.decode(FuelExportPayload.self, from: Data(contentsOf: url))
+        let decoded = try decoder.decode(FuelExportPayload.self, from: Data(contentsOf: artifact.url))
 
         #expect(decoded.meals.first?.name == "Export bowl")
         #expect(decoded.meals.first?.items.first?.isUserCorrected == true)
         #expect(decoded.hydration.first?.amountMilliliters == 350)
     }
 
+    @Test func localExportsAreUniqueAndExpiredFilesArePhysicallyDeleted() async throws {
+        let directory = FileManager.default.temporaryDirectory.appending(path: UUID().uuidString, directoryHint: .isDirectory)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let start = Date(timeIntervalSince1970: 1_800_000_000)
+        let payload = FuelExportPayload(
+            profile: .init(),
+            targets: .init(),
+            preferences: .init(),
+            meals: [],
+            hydration: []
+        )
+        let writer = LocalDataExportService(directory: directory, timeToLive: 60, now: { start })
+        let first = try await writer.write(payload)
+        let second = try await writer.write(payload)
+
+        #expect(first.url != second.url)
+        #expect(FileManager.default.fileExists(atPath: first.url.path()))
+        #expect(FileManager.default.fileExists(atPath: second.url.path()))
+
+        let cleaner = LocalDataExportService(
+            directory: directory,
+            timeToLive: 60,
+            now: { start.addingTimeInterval(61) }
+        )
+        try await cleaner.cleanupExpired()
+        #expect(!FileManager.default.fileExists(atPath: first.url.path()))
+        #expect(!FileManager.default.fileExists(atPath: second.url.path()))
+    }
+
     @Test @MainActor func deletingAllDataResetsDailyStateAndOnboarding() async throws {
         let container = try makeContainer()
-        let state = AppState(healthService: MockHealthDataService())
+        let state = AppState(healthService: MockHealthDataService(), consumesSharedHydrationCommands: false)
         state.configure(context: container.mainContext)
         await state.loadInitialData()
         var preferences = state.preferences

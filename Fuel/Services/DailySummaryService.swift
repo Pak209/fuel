@@ -71,6 +71,7 @@ final class DailyDataCoordinator {
     /// Once `attempts` reaches this value the record stops being offered for automatic
     /// retry; `lastError` is preserved so the UI can surface why it stopped.
     static let maxRetryAttempts = 8
+    nonisolated static let mealDeletionUndoRetention: TimeInterval = 15
 
     /// Grace period before an unreferenced meal photo is deleted. Long enough that an
     /// in-flight save or a just-undone deletion is never caught, short enough that photos
@@ -82,12 +83,20 @@ final class DailyDataCoordinator {
     private let summaryService: DailySummaryService
     private let boundaryService: DayBoundaryService
     private let healthService: any HealthDataService
+    private let mealPhotoStore: any MealPhotoStore
 
-    init(repositories: LocalRepositoryContainer, healthService: any HealthDataService, summaryService: DailySummaryService = .init(), boundaryService: DayBoundaryService = .init()) {
+    init(
+        repositories: LocalRepositoryContainer,
+        healthService: any HealthDataService,
+        summaryService: DailySummaryService = .init(),
+        boundaryService: DayBoundaryService = .init(),
+        mealPhotoStore: any MealPhotoStore = LocalMealPhotoStore()
+    ) {
         self.repositories = repositories
         self.healthService = healthService
         self.summaryService = summaryService
         self.boundaryService = boundaryService
+        self.mealPhotoStore = mealPhotoStore
     }
 
     func bootstrap() throws -> (UserProfile, DailyTargets) {
@@ -160,7 +169,7 @@ final class DailyDataCoordinator {
         let id = UUID()
         var imageFileName: String?
         if let imageData = draft.imageData {
-            imageFileName = try await LocalMealPhotoStore().save(imageData, id: id)
+            imageFileName = try await mealPhotoStore.save(imageData, id: id)
         }
         let meal = Meal(id: id, name: draft.name, type: draft.type, date: draft.date, nutrition: draft.nutrition, items: draft.items, provenance: draft.provenance, confidence: draft.confidence, imageFileName: imageFileName, notes: draft.notes, status: draft.status)
         do {
@@ -180,13 +189,35 @@ final class DailyDataCoordinator {
         let date = meal.date
         let timeZoneIdentifier = meal.timeZoneIdentifier
         try repositories.meals.delete(meal)
-        try invalidate(date: date, timeZoneIdentifier: timeZoneIdentifier)
+        do {
+            if let imageFileName = meal.imageFileName {
+                try await mealPhotoStore.stageForDeletion(fileName: imageFileName)
+            }
+            try invalidate(date: date, timeZoneIdentifier: timeZoneIdentifier)
+        } catch {
+            try? repositories.meals.restore(meal)
+            if let imageFileName = meal.imageFileName {
+                try? await mealPhotoStore.restoreStaged(fileName: imageFileName)
+            }
+            throw error
+        }
         enqueueSyncBestEffort(entityType: "meal", identifier: meal.id.uuidString, operation: .delete, value: ExportedMeal(meal: meal), revisionDate: meal.updatedAt)
+        scheduleDeletedPhotoExpiry(mealID: meal.id, fileName: meal.imageFileName)
     }
 
-    func restoreMeal(_ meal: Meal) throws {
-        try repositories.meals.restore(meal)
-        try invalidate(date: meal.date, timeZoneIdentifier: meal.timeZoneIdentifier)
+    func restoreMeal(_ meal: Meal) async throws {
+        if let imageFileName = meal.imageFileName {
+            try await mealPhotoStore.restoreStaged(fileName: imageFileName)
+        }
+        do {
+            try repositories.meals.restore(meal)
+            try invalidate(date: meal.date, timeZoneIdentifier: meal.timeZoneIdentifier)
+        } catch {
+            if let imageFileName = meal.imageFileName {
+                try? await mealPhotoStore.stageForDeletion(fileName: imageFileName)
+            }
+            throw error
+        }
     }
 
     func duplicateMeal(_ meal: Meal, at date: Date = .now) async throws -> Meal {
@@ -254,7 +285,7 @@ final class DailyDataCoordinator {
 
     func deleteAllLocalData() async throws {
         try repositories.deleteAllData()
-        try await LocalMealPhotoStore().deleteAll()
+        try await mealPhotoStore.deleteAll()
     }
 
     func preferences() throws -> UserPreferences { try repositories.preferences.preferences() }
@@ -278,7 +309,7 @@ final class DailyDataCoordinator {
         let oldImageFileName = meal.imageFileName
         var replacementImageFileName: String?
         if let imageData = draft.imageData {
-            replacementImageFileName = try await LocalMealPhotoStore().save(imageData, id: meal.id)
+            replacementImageFileName = try await mealPhotoStore.save(imageData, id: meal.id)
         }
         meal.update(with: draft, imageFileName: replacementImageFileName)
         if draft.removeExistingImage { meal.imageFileName = nil }
@@ -318,7 +349,7 @@ final class DailyDataCoordinator {
 
     func queueRecognition(imageData: Data) async throws -> PendingRecognitionRecord {
         let id = UUID()
-        let fileName = try await LocalMealPhotoStore().save(imageData, id: id)
+        let fileName = try await mealPhotoStore.save(imageData, id: id)
         let record = PendingRecognitionRecord(id: id, idempotencyKey: id.uuidString, photoFileName: fileName)
         do {
             try repositories.pendingRecognition.save(record)
@@ -330,7 +361,7 @@ final class DailyDataCoordinator {
     }
 
     func pendingRecognitionImageData(_ record: PendingRecognitionRecord) async throws -> Data {
-        try await LocalMealPhotoStore().load(fileName: record.photoFileName)
+        try await mealPhotoStore.load(fileName: record.photoFileName)
     }
 
     /// `attempts` is incremented in exactly one place per queue: when an attempt *fails*
@@ -397,11 +428,13 @@ final class DailyDataCoordinator {
         referenced.formUnion(try repositories.pendingRecognition.all().map(\.photoFileName))
         let names = referenced
         let logger = logger
+        let store = mealPhotoStore
         Task {
             do {
-                let removed = try await Self.purgeOrphanedPhotos(in: LocalMealPhotoStore(), referencedFileNames: names)
-                if !removed.isEmpty {
-                    logger.info("Purged \(removed.count, privacy: .public) orphaned meal photo(s)")
+                let removed = try await Self.purgeOrphanedPhotos(in: store, referencedFileNames: names)
+                let staged = try await Self.purgeStagedPhotos(in: store, retention: 0)
+                if !removed.isEmpty || !staged.isEmpty {
+                    logger.info("Purged \(removed.count + staged.count, privacy: .public) orphaned meal photo(s)")
                 }
             } catch {
                 logger.error("Orphaned photo purge failed: \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
@@ -428,10 +461,25 @@ final class DailyDataCoordinator {
         return removed
     }
 
+    @discardableResult
+    nonisolated static func purgeStagedPhotos(
+        in store: any MealPhotoStore,
+        retention: TimeInterval = mealDeletionUndoRetention,
+        now: Date = .now
+    ) async throws -> [String] {
+        var removed: [String] = []
+        for photo in try await store.stagedPhotos() {
+            guard now.timeIntervalSince(photo.modifiedAt) >= retention else { continue }
+            try await store.deleteStaged(fileName: photo.fileName)
+            removed.append(photo.fileName)
+        }
+        return removed
+    }
+
     func deletePendingRecognition(_ record: PendingRecognitionRecord) async throws {
         let fileName = record.photoFileName
         try repositories.pendingRecognition.delete(record)
-        try await LocalMealPhotoStore().delete(fileName: fileName)
+        try await mealPhotoStore.delete(fileName: fileName)
     }
 
     func saveProfile(_ profile: UserProfile) throws {
@@ -620,9 +668,22 @@ final class DailyDataCoordinator {
 
     private func deletePhotoBestEffort(fileName: String, reason: String) async {
         do {
-            try await LocalMealPhotoStore().delete(fileName: fileName)
+            try await mealPhotoStore.delete(fileName: fileName)
         } catch {
             logger.error("Photo cleanup failed during \(reason, privacy: .public): \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    private func scheduleDeletedPhotoExpiry(mealID: UUID, fileName: String?) {
+        guard let fileName else { return }
+        Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.mealDeletionUndoRetention))
+            guard !Task.isCancelled, let self,
+                  (try? self.repositories.meals.meal(id: mealID)?.status) == .deleted else { return }
+            do { try await self.mealPhotoStore.deleteStaged(fileName: fileName) }
+            catch {
+                self.logger.error("Deleted meal photo cleanup failed: \(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")
+            }
         }
     }
 }

@@ -19,9 +19,13 @@ final class ProfileDataUITests: XCTestCase {
         profileButton.tap()
 
         let exportDataLink = app.buttons["Export or delete data"]
-        guard exportDataLink.waitForExistence(timeout: UITestSupport.timeout) else {
-            throw XCTSkip("'Export or delete data' link not found on the Profile screen.")
+        var scrollAttempts = 0
+        while !exportDataLink.waitForExistence(timeout: scrollAttempts == 0 ? UITestSupport.shortTimeout : 1),
+              scrollAttempts < 5 {
+            app.swipeUp()
+            scrollAttempts += 1
         }
+        XCTAssertTrue(exportDataLink.exists, "'Export or delete data' should be reachable on the Profile screen")
         exportDataLink.tap()
 
         let exportButton = app.buttons["Prepare JSON export"]

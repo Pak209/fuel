@@ -543,7 +543,7 @@ private struct DataSourcesView: View {
 
 private struct PrivacyDataView: View {
     let state: AppState
-    @State private var exportURL: URL?
+    @State private var exportArtifact: LocalExportArtifact?
     @State private var preparesExport = false
     @State private var confirmsDeletion = false
     @State private var errorMessage: String?
@@ -552,8 +552,12 @@ private struct PrivacyDataView: View {
         List {
             Section("Export") {
                 Button(preparesExport ? "Preparing…" : "Prepare JSON export", action: prepareExport).disabled(preparesExport)
-                if let exportURL { ShareLink(item: exportURL) { Label("Share Fuel export", systemImage: "square.and.arrow.up") } }
+                if let exportArtifact, exportArtifact.isAvailable() {
+                    ShareLink(item: exportArtifact.url) { Label("Share Fuel export", systemImage: "square.and.arrow.up") }
+                }
                 Text("Exports include profile settings, targets, meals, food items, provenance, and hydration logs. Meal photos are not included.")
+                    .font(.caption).foregroundStyle(FuelTheme.secondary)
+                Text("The temporary file is deleted after one hour or when you leave this screen. A copy you share is controlled by its recipient.")
                     .font(.caption).foregroundStyle(FuelTheme.secondary)
             }
             Section("Meal photos") {
@@ -575,6 +579,20 @@ private struct PrivacyDataView: View {
         .alert("Data operation failed", isPresented: Binding(
             get: { errorMessage != nil }, set: { if !$0 { errorMessage = nil } }
         )) { Button("OK", role: .cancel) {} } message: { Text(errorMessage ?? "Unknown error") }
+        .task { await state.cleanupExpiredExports() }
+        .task(id: exportArtifact?.id) {
+            guard let artifact = exportArtifact else { return }
+            let delay = max(0, artifact.expiresAt.timeIntervalSinceNow)
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled, exportArtifact?.id == artifact.id else { return }
+            await state.removeExport(artifact)
+            exportArtifact = nil
+        }
+        .onDisappear {
+            guard let artifact = exportArtifact else { return }
+            exportArtifact = nil
+            Task { await state.removeExport(artifact) }
+        }
     }
 
     private var retentionConsentBinding: Binding<Bool> {
@@ -593,7 +611,11 @@ private struct PrivacyDataView: View {
         preparesExport = true
         Task {
             defer { preparesExport = false }
-            do { exportURL = try await state.exportData() }
+            do {
+                let previous = exportArtifact
+                exportArtifact = try await state.exportData()
+                if let previous { await state.removeExport(previous) }
+            }
             catch { errorMessage = error.localizedDescription }
         }
     }

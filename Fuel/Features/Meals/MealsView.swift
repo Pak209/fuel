@@ -252,6 +252,8 @@ struct MealsView: View {
                 try await state.deleteMeal(meal)
                 lastDeleted = meal
                 AccessibilityNotification.Announcement("\(meal.name) deleted").post()
+                try? await Task.sleep(for: .seconds(DailyDataCoordinator.mealDeletionUndoRetention))
+                if lastDeleted?.id == meal.id { lastDeleted = nil }
             } catch {
                 fail(error)
             }
@@ -273,7 +275,9 @@ struct MealsView: View {
 }
 
 private enum MealHistoryFilter: String, CaseIterable, Identifiable {
-    case today, week, breakfast, lunch, dinner, snacks, all
+    // Put the broadest scope first so it remains immediately reachable instead of
+    // being stranded beyond every meal-type chip on compact iPhones.
+    case all, today, week, breakfast, lunch, dinner, snacks
     var id: String { rawValue }
     var title: String {
         switch self {

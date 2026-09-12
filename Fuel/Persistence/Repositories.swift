@@ -6,6 +6,7 @@ enum LocalDataError: LocalizedError {
     case missingRecord(String)
     case persistenceFailed(String)
     case invalidAmount
+    case invalidExternalCommand
 
     var errorDescription: String? {
         switch self {
@@ -13,6 +14,7 @@ enum LocalDataError: LocalizedError {
         case .missingRecord(let name): "The saved \(name) could not be found."
         case .persistenceFailed(let reason): "Fuel could not save your data. \(reason)"
         case .invalidAmount: "Enter an amount greater than zero."
+        case .invalidExternalCommand: "A shortcut entry was invalid and was not imported."
         }
     }
 }
@@ -575,7 +577,17 @@ struct LocalRepositoryContainer {
     }
 
     @discardableResult
-    func consumeHydrationCommand(_ command: PendingHydrationCommand, dayKey: String) throws -> HydrationEntry? {
+    func consumeHydrationCommand(
+        _ command: PendingHydrationCommand,
+        dayKey: String,
+        now: Date = .now
+    ) throws -> HydrationEntry? {
+        guard (FuelSharedStore.minimumHydrationAmount...FuelSharedStore.maximumHydrationAmount)
+            .contains(command.amountMilliliters),
+              command.createdAt >= now.addingTimeInterval(-30 * 24 * 60 * 60),
+              command.createdAt <= now.addingTimeInterval(5 * 60) else {
+            throw LocalDataError.invalidExternalCommand
+        }
         let commandID = command.id
         if try context.fetch(FetchDescriptor<ProcessedExternalCommandRecord>(
             predicate: #Predicate { $0.id == commandID }

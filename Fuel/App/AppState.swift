@@ -52,6 +52,7 @@ final class AppState {
     @ObservationIgnored private var connectivityTask: Task<Void, Never>?
     @ObservationIgnored private var inFlightRecognitionIDs: Set<UUID> = []
     @ObservationIgnored private var isConsumingSharedRoute = false
+    @ObservationIgnored private let consumesSharedHydrationCommands: Bool
 
     init(
         scoreService: any HealthScoreService = LocalHealthScoreService(),
@@ -68,6 +69,7 @@ final class AppState {
         connectivityMonitor: any ConnectivityMonitoring = LiveConnectivityMonitor(),
         backendService: (any BackendServicing)? = nil,
         entitlements: any EntitlementService = MockEntitlementService(),
+        consumesSharedHydrationCommands: Bool = true,
         now: Date = .now
     ) {
         let profile = UserProfile()
@@ -97,6 +99,7 @@ final class AppState {
         syncEngine = CloudSyncEngine(backend: backend)
         accountSummary = .localOnly(backendConfigured: backend.isConfigured)
         self.entitlements = entitlements
+        self.consumesSharedHydrationCommands = consumesSharedHydrationCommands
         let arguments = ProcessInfo.processInfo.arguments
         if let index = arguments.firstIndex(of: "-FuelTab"),
            arguments.indices.contains(index + 1),
@@ -135,7 +138,7 @@ final class AppState {
         dataPhase = .loading
         do {
             #if DEBUG
-            await applyUITestLaunchArgumentsIfNeeded()
+            try await applyUITestLaunchArgumentsIfNeeded()
             #endif
             permissionState = await healthService.authorizationStatus()
             (profile, targets) = try coordinator.bootstrap()
@@ -147,7 +150,9 @@ final class AppState {
             #endif
             favorites = try coordinator.favorites()
             try coordinator.reconcileInterruptedWork()
-            try consumeSharedHydrationCommands(using: coordinator)
+            if consumesSharedHydrationCommands {
+                try await consumeSharedHydrationCommands(using: coordinator)
+            }
             pendingRecognitions = try coordinator.pendingRecognitionJobs()
             refreshAccountSummary(using: coordinator)
             let feedback = try coordinator.recentRecommendationFeedback(since: Date.now.addingTimeInterval(-7 * 86_400))
@@ -169,7 +174,9 @@ final class AppState {
     func refresh() async {
         guard let coordinator else { return }
         do {
-            try consumeSharedHydrationCommands(using: coordinator)
+            if consumesSharedHydrationCommands {
+                try await consumeSharedHydrationCommands(using: coordinator)
+            }
             snapshot = try await coordinator.snapshot(for: selectedDate, profile: profile, targets: targets)
             pendingRecognitions = try coordinator.pendingRecognitionJobs()
             refreshAccountSummary(using: coordinator)
@@ -195,7 +202,7 @@ final class AppState {
         transientMessage = draft.status == .logged
             ? Self.logConfirmation(name: meal.name, before: nutritionBeforeSave, after: snapshot.nutrition)
             : "Meal saved"
-        await SpotlightIndexer.index(meal: meal)
+        SpotlightIndexer.index(meal: meal)
         recordAnalytics(.mealLogged(source: draft.provenance == .aiEstimated ? .photoScan : .manualEntry))
     }
 
@@ -262,15 +269,15 @@ final class AppState {
         try await coordinator.deleteMeal(meal)
         try await reloadAfterMutation()
         transientMessage = "Meal deleted"
-        await SpotlightIndexer.deindex(mealID: mealID)
+        SpotlightIndexer.deindex(mealID: mealID)
     }
 
     func restoreMeal(_ meal: Meal) async throws {
         guard let coordinator else { throw LocalDataError.notConfigured }
-        try coordinator.restoreMeal(meal)
+        try await coordinator.restoreMeal(meal)
         try await reloadAfterMutation()
         transientMessage = "Meal restored"
-        await SpotlightIndexer.index(meal: meal)
+        SpotlightIndexer.index(meal: meal)
     }
 
     func duplicateMeal(_ meal: Meal, at date: Date = .now) async throws {
@@ -278,7 +285,7 @@ final class AppState {
         let duplicate = try await coordinator.duplicateMeal(meal, at: date)
         try await reloadAfterMutation()
         transientMessage = "Meal duplicated"
-        await SpotlightIndexer.index(meal: duplicate)
+        SpotlightIndexer.index(meal: duplicate)
     }
 
     func meal(id: UUID) throws -> Meal? {
@@ -345,7 +352,7 @@ final class AppState {
         try await coordinator.updateMeal(meal, with: draft)
         try await reloadAfterMutation()
         transientMessage = "Meal updated"
-        await SpotlightIndexer.index(meal: meal)
+        SpotlightIndexer.index(meal: meal)
     }
 
     func addWater(milliliters: Double = 250, at date: Date = .now) async throws {
@@ -382,20 +389,31 @@ final class AppState {
         notificationAuthorizationState = await notificationScheduler.authorizationState()
     }
 
-    func exportData() async throws -> URL {
+    func exportData() async throws -> LocalExportArtifact {
         guard let coordinator else { throw LocalDataError.notConfigured }
         let payload = try coordinator.exportPayload(profile: profile, targets: targets, preferences: preferences)
-        let url = try await dataExportService.write(payload)
+        let artifact = try await dataExportService.write(payload)
         recordAnalytics(.exportRequested)
-        return url
+        return artifact
+    }
+
+    func cleanupExpiredExports() async {
+        do { try await dataExportService.cleanupExpired() }
+        catch { Observability.log(error, category: .data, message: "Expired export cleanup failed") }
+    }
+
+    func removeExport(_ artifact: LocalExportArtifact) async {
+        do { try await dataExportService.remove(artifact) }
+        catch { Observability.log(error, category: .data, message: "Export removal failed") }
     }
 
     func deleteAllLocalData() async throws {
         guard let coordinator else { throw LocalDataError.notConfigured }
+        try await dataExportService.removeAll()
         try await coordinator.deleteAllLocalData()
         await notificationScheduler.removeAllFuelNotifications()
-        FuelSharedStore.clearEngagementData()
-        await SpotlightIndexer.deindexAll()
+        try FuelSharedStore.clearEngagementData()
+        SpotlightIndexer.deindexAll()
         (profile, targets) = try coordinator.bootstrap()
         preferences = try coordinator.preferences()
         favorites = try coordinator.favorites()
@@ -556,18 +574,19 @@ final class AppState {
             presentedRoute = route
         case .addWater:
             selectedTab = .today
-            let shouldAdd = URLComponents(url: url, resolvingAgainstBaseURL: false)?
-                .queryItems?
-                .contains(where: { $0.name == "add" }) == true
-            if shouldAdd {
-                do { try await addWater() }
-                catch {
-                    Observability.log(error, category: .data, message: "Quick-add water from route failed")
-                    transientMessage = error.localizedDescription
-                }
-            } else {
-                presentedRoute = route
-            }
+            presentedRoute = route
+        }
+    }
+
+    /// Handles the trusted command emitted only by a validated hydration
+    /// notification action. Public URLs intentionally cannot call this path.
+    func handleNotificationQuickAddWater() async {
+        selectedTab = .today
+        presentedRoute = nil
+        do { try await addWater(milliliters: 250) }
+        catch {
+            Observability.log(error, category: .data, message: "Quick-add water from notification failed")
+            transientMessage = error.localizedDescription
         }
     }
 
@@ -631,16 +650,45 @@ final class AppState {
         publishWidgetSummary()
     }
 
-    private func consumeSharedHydrationCommands(using coordinator: DailyDataCoordinator) throws {
-        let commands = FuelSharedStore.pendingHydrationCommands()
-        guard !commands.isEmpty else { return }
-        var acknowledged = Set<UUID>()
-        for command in commands {
-            _ = try coordinator.consumeHydrationCommand(command, timeZoneIdentifier: profile.timeZoneIdentifier)
-            acknowledged.insert(command.id)
-            recordAnalytics(.waterLogged(source: .widget))
+    private func consumeSharedHydrationCommands(using coordinator: DailyDataCoordinator) async throws {
+        while true {
+            let commands: [PendingHydrationCommand]
+            do {
+                commands = try FuelSharedStore.pendingHydrationCommands(limit: FuelSharedStore.hydrationDrainBatchSize)
+            } catch SharedHydrationQueueError.corruptedQueue {
+                if try FuelSharedStore.repairCorruptHydrationCommands() {
+                    transientMessage = "Fuel discarded unreadable shortcut entries without changing your water log."
+                }
+                continue
+            }
+            guard !commands.isEmpty else { return }
+            var acknowledged = Set<UUID>()
+            do {
+                for command in commands {
+                    do {
+                        let inserted = try coordinator.consumeHydrationCommand(
+                            command,
+                            timeZoneIdentifier: profile.timeZoneIdentifier
+                        )
+                        acknowledged.insert(command.id)
+                        if inserted { recordAnalytics(.waterLogged(source: .widget)) }
+                    } catch LocalDataError.invalidExternalCommand {
+                        acknowledged.insert(command.id)
+                        Observability.log(
+                            LocalDataError.invalidExternalCommand,
+                            category: .data,
+                            message: "Rejected invalid shared hydration command"
+                        )
+                    }
+                }
+                try FuelSharedStore.acknowledgeHydrationCommands(ids: acknowledged)
+            } catch {
+                try? FuelSharedStore.acknowledgeHydrationCommands(ids: acknowledged)
+                throw error
+            }
+            guard commands.count == FuelSharedStore.hydrationDrainBatchSize else { return }
+            await Task.yield()
         }
-        FuelSharedStore.acknowledgeHydrationCommands(ids: acknowledged)
     }
 
     private func publishWidgetSummary() {
@@ -705,20 +753,16 @@ final class AppState {
     /// "--uitest-complete-onboarding" wipes local data and then marks
     /// onboarding complete so UI tests can reach the tab bar immediately,
     /// without driving the onboarding flow first.
-    private func applyUITestLaunchArgumentsIfNeeded() async {
+    private func applyUITestLaunchArgumentsIfNeeded() async throws {
         let arguments = ProcessInfo.processInfo.arguments
         let shouldReset = arguments.contains("--uitest-reset")
         let shouldCompleteOnboarding = arguments.contains("--uitest-complete-onboarding")
         guard shouldReset || shouldCompleteOnboarding else { return }
-        do {
-            try await deleteAllLocalData()
-            if shouldCompleteOnboarding {
-                var updatedPreferences = preferences
-                updatedPreferences.onboardingCompleted = true
-                try updatePreferences(updatedPreferences)
-            }
-        } catch {
-            Observability.log(error, category: .app, message: "UI test launch-argument setup failed")
+        try await deleteAllLocalData()
+        if shouldCompleteOnboarding {
+            var updatedPreferences = preferences
+            updatedPreferences.onboardingCompleted = true
+            try updatePreferences(updatedPreferences)
         }
     }
     #endif
