@@ -16,6 +16,11 @@ evidence before closing an item.
   `/Users/danielpak/Library/Developer/XcodeBuildMCP/workspaces/Fuel-a07e40686684/`.
 - These supersede the earlier 142-test checkpoint below for client verification.
   They do not close the real-device trial, account-isolation, or backend gates.
+- Physical-build preparation now also passed for source `c4cb152`: a
+  development-signed Release iPhone build, strict/deep signature verification,
+  and matching HealthKit/App Group provisioning checks. Installable artifact and
+  evidence are recorded in `DEVICE_INSTALLATION.md`. The phone is still unavailable;
+  actual installation and runtime behavior are not claimed.
 
 ## 1. Finish local reliability and device validation
 

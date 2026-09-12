@@ -4,6 +4,10 @@ Status: not yet verified. Do not infer completion from simulator results or from
 calendar time since installation. The user must actually use the app and record
 the results below. Use the latest verified build when beginning the trial.
 
+The `c4cb152` development-signed iPhone build is prepared and signature-verified;
+see [DEVICE_INSTALLATION.md](DEVICE_INSTALLATION.md). This preparation does not
+start the trial or establish that the build is installed on the phone.
+
 Record device model, iOS version, Fuel version/build, source commit, installation
 date, trial dates, and enabled Health/notification permissions. Keep personal
 meal and Health data out of this shared report; totals are unnecessary.
