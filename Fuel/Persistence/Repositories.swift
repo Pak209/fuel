@@ -25,6 +25,7 @@ protocol MealRepository {
     func allMeals() throws -> [Meal]
     func meal(id: UUID) throws -> Meal?
     func save(_ meal: Meal) throws
+    func saveRemote(_ meal: Meal) throws
     func delete(_ meal: Meal) throws
     func restore(_ meal: Meal) throws
 }
@@ -141,6 +142,11 @@ final class SwiftDataMealRepository: MealRepository {
     func save(_ meal: Meal) throws {
         if meal.modelContext == nil { context.insert(meal) }
         meal.updatedAt = .now
+        try saveContext()
+    }
+
+    func saveRemote(_ meal: Meal) throws {
+        if meal.modelContext == nil { context.insert(meal) }
         try saveContext()
     }
 
@@ -500,7 +506,7 @@ final class SwiftDataSyncQueueRepository: SyncQueueRepository {
 
     func save(_ operation: SyncOperationRecord) throws {
         if operation.modelContext == nil { context.insert(operation) }
-        operation.updatedAt = .now
+        // updatedAt describes the user mutation, not upload/retry bookkeeping.
         try saveContext()
     }
 

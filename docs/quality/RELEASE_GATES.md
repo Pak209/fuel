@@ -7,14 +7,17 @@ reviewer, or a physical device. This document collects them from
 `Backend/README.md`'s "Operational release evidence" section,
 `SECURITY.md`'s "Release gates" section, and
 `docs/safety/PROFESSIONAL_REVIEW_CHECKLIST.md`, and states what evidence would
-actually close each one. Nothing in this repository currently satisfies any of
-these gates; this is a checklist to run through before external distribution,
-not a record that they've been run.
+actually close each one. Source configuration, simulator checks, signed device
+builds, and distribution each establish different evidence. Some source
+configuration is already complete, including the assigned Apple team. Use
+[REMAINING_SCOPE.md](REMAINING_SCOPE.md) as the authoritative current work list;
+this checklist defines the evidence still needed for external distribution.
 
 ## How to read this document
 
 Each gate has:
-- **What's missing** — the concrete external thing (account, deployment,
+
+- **Current status / what's missing** — the concrete external thing (account, deployment,
   human, device) that source code cannot substitute for.
 - **What closes it** — the specific artifact/evidence that would let a
   reviewer sign off, per the source document it's drawn from.
@@ -23,14 +26,14 @@ Each gate has:
 
 ## Apple platform configuration
 
-| Gate | What's missing | What closes it |
+| Gate | Current status / remaining evidence | What closes it |
 | --- | --- | --- |
-| Apple Developer Team | `DEVELOPMENT_TEAM` is empty in every build configuration (`Fuel.xcodeproj/project.pbxproj:154,188,212,235`) | A real Apple Developer Program team ID assigned to the project's code signing settings |
+| Apple Developer Team and distribution signing | Team `5YJJCSFSQM` is already assigned in all app/widget Debug, Staging, and Release configurations in `Fuel.xcodeproj/project.pbxproj`; the team-setting task is complete. This alone does not establish distribution certificate/profile availability or App Store upload readiness. | Verify current team access and the required distribution identity/profiles with a signed distribution archive and successful validation/upload. |
 | Production bundle identifier | Current identifier is `com.pak.fuel` (`Fuel.xcodeproj/project.pbxproj`), fine for development but needs to be the identifier actually registered for distribution | Confirmed App Store Connect app record under the production bundle ID, matching what ships |
-| App Group | `Fuel/Fuel.entitlements` already declares `group.com.pak.fuel` — the entitlement exists in source, but a App Group must still be registered under the real team in the Apple Developer portal before it resolves for a signed build | App Group registered and visible under the assigned team in the Developer portal |
-| Sign in with Apple capability | `Fuel/Fuel.entitlements` declares `com.apple.developer.applesignin` — again, present in source but not provisioned without a real team | Capability enabled for the app ID under the assigned team |
-| iCloud/CloudKit | Not present in `Fuel/Fuel.entitlements` at all today — the SwiftData store is a plain local `ModelConfiguration` with no CloudKit database (`Fuel/App/FuelApp.swift:11-27`) | A deliberate decision on whether Fuel ever adopts CloudKit-backed SwiftData, and if so the entitlement, container, and schema work that implies — not currently planned or wired |
-| Notification capabilities | Local notification scheduling exists in code (`Fuel/Services/NotificationService.swift`), but push/remote notification entitlements are not part of this review — confirm which are actually needed before submission | Whatever this project's actual notification design requires (local-only appears sufficient today, per the client-side scheduling code — the app has no server-push code path) |
+| App Group and HealthKit | `Fuel/Fuel.entitlements` declares `group.com.pak.fuel`, HealthKit, and HealthKit background delivery. `FuelWidgets/FuelWidgets.entitlements` declares the same App Group. Verify the distribution profiles and signed products match these capabilities; source declarations alone are not that evidence. | Matching registered app IDs/group, distribution provisioning, signed entitlements, and the physical-device HealthKit/widget checks below. |
+| Sign in with Apple capability | `com.apple.developer.applesignin` is absent from the current `Fuel/Fuel.entitlements`; it was removed for the local-only v1. It is not an unused capability that still needs registering for that build. | Before the planned cloud Apple sign-in ships, restore the entitlement, enable/provision it for the app ID under team `5YJJCSFSQM`, and verify the client/server sign-in flow. |
+| iCloud/CloudKit | Not applicable to the chosen custom-backend sync architecture. SwiftData remains local and `Fuel/Fuel.entitlements` has no CloudKit entitlement. | No CloudKit configuration is required by the current plan. Revisit only if the storage architecture changes. |
+| Notification capabilities | The current implementation uses local notifications in `Fuel/Services/NotificationService.swift`; it has no server-push path or `aps-environment` entitlement. | Complete the physical-device notification checks below. APNs provisioning becomes a separate gate only if remote push is introduced. |
 
 ## Backend deployment
 
@@ -46,11 +49,12 @@ Each gate has:
 | Dashboards, alerts, on-call | `Backend/README.md`'s evidence list | Actual operational tooling pointed at the live deployment |
 | Staging-to-production promotion approval | `Backend/README.md`'s evidence list | A recorded approval decision, not an automatic promotion |
 
-Client-side behavior that is already correct and does not block on the above:
+The local-only build can operate while the cloud gates remain open:
 `CloudSyncEngine.synchronize` returns `.localOnly` whenever the backend isn't
-configured (`Fuel/Services/SyncService.swift:59`), so the app degrades safely
-in the absence of all of this — see `docs/sync/RESTORE_AND_MIGRATION.md` for
-the full behavior of sync while unconfigured or partially configured.
+configured (`Fuel/Services/SyncService.swift`). This is not evidence that account,
+sync, or server behavior is production-ready. See
+[REMAINING_SCOPE.md](REMAINING_SCOPE.md) for the outstanding account/sync work and
+`docs/sync/RESTORE_AND_MIGRATION.md` for the restore design.
 
 ## Human review
 
@@ -100,7 +104,10 @@ physical-device gate, only a useful precursor to it.
 
 ## Status
 
-No gate in this document is closed as of this writing. This is expected at
-this stage of the project — the roadmap and threat model were written
-precisely to make that explicit rather than implying completeness. Treat this
-document as a checklist to work through, not a report of work already done.
+The Apple team setting is complete and the current source includes the app/widget
+capability declarations described above. These establish part of the signing setup;
+distribution readiness still needs its external evidence. CloudKit is not a gate
+for the selected architecture; Sign in with Apple provisioning applies when the
+cloud account feature is enabled. Backend deployment, human reviews, sustained
+physical-device validation, and distribution acceptance still need their required
+evidence. Track current completion in [REMAINING_SCOPE.md](REMAINING_SCOPE.md).

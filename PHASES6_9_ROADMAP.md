@@ -2,6 +2,12 @@
 
 This document tracks the recovered product roadmap for daily engagement, backend/sync, privacy/security/safety, and quality/reliability. A checked item requires both implementation and verification. Items that depend on external accounts, deployed infrastructure, or qualified professional review are called out explicitly rather than represented as complete by a placeholder.
 
+> Historical phase acceptance matrix. Checks below describe client implementation
+> and earlier simulator evidence, not production completeness. Current defects,
+> verification, and remaining backend/account/device/release work are tracked in
+> `docs/quality/REMAINING_SCOPE.md`. Do not treat a documented strategy or a mock
+> transport test as proof of cloud restore, safe account switching, or deployment.
+
 Verification evidence for checked items: unit suite (115 tests, 7 suites) and UI-test suite passing on the iPhone 16 simulator (iOS 26.5), Debug/Staging/Release builds, and an unsigned Release archive whose bundle was inspected for icon, launch screen, URL scheme, privacy manifest, and compliance keys. See `docs/quality/APP_STORE_READINESS.md` and `docs/quality/TESTFLIGHT_PLAN.md` for the path from here to TestFlight.
 
 ## Phase 6 — Daily engagement
@@ -53,7 +59,7 @@ Verification evidence for checked items: unit suite (115 tests, 7 suites) and UI
 - [x] Sign in with Apple client flow and secure credential storage (implemented; hidden in v1 builds until a backend is configured, and the entitlement is removed until then — see `docs/quality/TESTFLIGHT_PLAN.md`)
 - [x] Durable offline sync queue with operation state and retry metadata (bounded attempts with terminal failure state)
 - [x] Conflict-resolution rules and source revision tracking
-- [x] Reinstall/restore and account-migration strategy documented (`docs/sync/RESTORE_AND_MIGRATION.md`, including the current fresh-install pull limitation)
+- [x] Reinstall/restore and account-migration strategy documented (`docs/sync/RESTORE_AND_MIGRATION.md`; empty-queue pull is now implemented client-side, but account isolation and live restore remain open)
 - [x] Account export and deletion client flows
 - [x] Health data excluded from sync unless required and explicitly enabled (never synced; entity-type allowlist asserted by tests)
 - [x] Live cloud sync remains disabled until a reviewed backend/container and Apple credentials are configured

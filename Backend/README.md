@@ -44,11 +44,20 @@ The canonical client DTOs and validation limits live in `Fuel/Services/BackendSe
 ## Sync semantics
 
 - Client mutations use stable entity identifiers and operation idempotency keys.
+- Empty-operation batches still pull; `sinceRevision` carries the last fully applied account cursor (omitted means zero).
+- Each batch has at most 100 operations and a 1 MB encoded request body, including JSON/base64 overhead. Client byte-limited prefixes leave the remaining operations queued.
 - The server returns accepted keys, explicit conflicts, remote changes, and a monotonic account revision.
+- Every submitted operation has exactly one accepted or conflicted outcome. Unknown/duplicate outcomes or omitted acknowledgements invalidate the entire response.
+- The returned revision is a fully represented page cursor. Never advance it past an omitted remote change; the client cannot detect missing history from revision gaps alone.
+- A remote page contains at most 500 unique entity snapshots/tombstones, strictly increasing in revision above the request cursor and no later than the returned cursor. Conflicted entities cannot also appear in that page; accepted writes may have a canonical feed echo.
+- Full entity payloads are capped at 500 KB and the encoded response at 5 MB. Client semantic validation additionally checks nested identifiers, bounded fields, finite arithmetic, dates/time zones, and complete preference snapshots before applying any response mutation.
 - Fuel chooses the newer `updatedAt`; equal timestamps use revision, with server winning ties.
+- Edits made during an older upload are separate successor operations and cannot be overwritten or acknowledged by that predecessor's response.
 - A local win receives a new idempotency key and retries against the returned server revision.
 - A remote win is applied through typed decoders; unknown entity types or malformed payloads stop the batch.
 - HealthKit samples are not part of the sync entity set.
+
+These are implemented client expectations, not demonstrated server behavior. Safe account/credential isolation, refresh/reauthentication, transactional disk-failure recovery, and complete restore coverage are still outstanding in `docs/sync/RESTORE_AND_MIGRATION.md`. Do not enable a deployment merely by populating a URL.
 
 ## Operational release evidence
 

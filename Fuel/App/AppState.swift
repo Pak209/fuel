@@ -467,9 +467,23 @@ final class AppState {
         syncState = pending > 0 ? .syncing(pending) : .idle
         syncState = await syncEngine.synchronize(coordinator: coordinator)
         refreshAccountSummary(using: coordinator)
-        if case .current = syncState {
-            recordAnalytics(.syncCompleted(operationCount: pending))
-            await refresh()
+        switch syncState {
+        case .current, .conflict, .waiting:
+            do {
+                // Remote profile/target/preferences writes must reach active UI,
+                // recommendations, and notification schedules, not just SwiftData.
+                (profile, targets) = try coordinator.bootstrap()
+                preferences = try coordinator.preferences()
+                try await notificationScheduler.apply(preferences: preferences, requestingAuthorization: false)
+                await refresh()
+                if case .current = syncState {
+                    recordAnalytics(.syncCompleted(operationCount: pending))
+                }
+            } catch {
+                Observability.log(error, category: .sync, message: "Synced state refresh failed")
+                syncState = .failed(error.localizedDescription)
+            }
+        default: break
         }
     }
 

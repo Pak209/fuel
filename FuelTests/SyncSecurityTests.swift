@@ -393,13 +393,19 @@ struct SyncSecurityTests {
         let mealID = meal.id.uuidString
         let originalKey = try #require(try coordinator.allSyncOperations().first?.idempotencyKey)
 
+        var remoteMeal = ExportedMeal(meal: meal)
+        remoteMeal.createdAt = .now.addingTimeInterval(-2_000)
+        remoteMeal.updatedAt = .now.addingTimeInterval(-1_000)
+        let remotePayload = try JSONEncoder().encode(remoteMeal)
+        let remoteUpdatedAt = remoteMeal.updatedAt
+
         let mockBackend = MockBackendServicing()
         await mockBackend.setSynchronizeHandler { _, _ in
             // Local queue record's `updatedAt` is set to "now" on save, so it is
             // guaranteed newer than a server timestamp from the recent past.
             SyncBatchResponse(
                 acceptedIdempotencyKeys: [],
-                conflicts: [SyncConflict(entityType: "meal", entityIdentifier: mealID, operation: .create, serverRevision: 999, serverUpdatedAt: .now.addingTimeInterval(-1_000), serverPayload: Data())],
+                conflicts: [SyncConflict(entityType: "meal", entityIdentifier: mealID, operation: .create, serverRevision: 9, serverUpdatedAt: remoteUpdatedAt, serverPayload: remotePayload)],
                 serverRevision: 10,
                 remoteChanges: nil
             )

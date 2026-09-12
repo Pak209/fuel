@@ -1,5 +1,25 @@
 # Fuel — App Store / TestFlight Readiness Report
 
+> **Historical snapshot — 2026-08-22.** The report below preserves the findings and
+> citations from that audit; its blockers and time estimates are not the current
+> task list. [REMAINING_SCOPE.md](REMAINING_SCOPE.md) is the authoritative current
+> scope, and [RELEASE_GATES.md](RELEASE_GATES.md) defines the remaining release evidence.
+
+Current source already assigns team `5YJJCSFSQM` to the app and widget, maps
+`AppIcon.png` in the app icon catalog, and includes `UILaunchScreen`, the backend
+URL mapping, and the encryption declaration in `Fuel/Info.plist`. The in-app
+privacy policy and hostable policy files also exist. Sign in with Apple is gated
+on a configured backend and its entitlement is absent from the local-only build.
+These corrections supersede the corresponding "empty", "missing", and "no team"
+claims below. They establish source changes, not App Store acceptance or completion
+of the device, backend, and human-review gates. Other historical findings likewise
+need their current source and test evidence checked before being treated as pending.
+
+Sources for this correction: `Fuel.xcodeproj/project.pbxproj`,
+`Fuel/Assets.xcassets/AppIcon.appiconset/Contents.json`, `Fuel/Info.plist`,
+`Fuel/Fuel.entitlements`, `Fuel/Features/Profile/ProfileView.swift`,
+`Fuel/Features/Profile/PrivacyPolicyView.swift`, and `docs/legal/privacy-policy.md`.
+
 Synthesized from five dimension audits (product, submission artifacts, signing, runtime, backend/services) on 2026-08-22. Contested findings were re-verified directly against the repo; citations are preserved on every item.
 
 ---

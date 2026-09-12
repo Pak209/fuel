@@ -84,6 +84,7 @@ final class DailyDataCoordinator {
     private let boundaryService: DayBoundaryService
     private let healthService: any HealthDataService
     private let mealPhotoStore: any MealPhotoStore
+    private(set) var syncSessionIdentifier = UUID()
 
     init(
         repositories: LocalRepositoryContainer,
@@ -284,6 +285,7 @@ final class DailyDataCoordinator {
     }
 
     func deleteAllLocalData() async throws {
+        syncSessionIdentifier = UUID()
         try repositories.deleteAllData()
         try await mealPhotoStore.deleteAll()
     }
@@ -504,6 +506,7 @@ final class DailyDataCoordinator {
     func accountMetadata() throws -> AccountMetadataRecord { try repositories.accountMetadata.account() }
 
     func applyAccountSession(_ result: AccountSessionResult) throws {
+        syncSessionIdentifier = UUID()
         let account = try repositories.accountMetadata.account()
         account.appleUserIdentifierHash = result.userIdentifierHash
         account.displayName = result.displayName
@@ -513,6 +516,7 @@ final class DailyDataCoordinator {
     }
 
     func signOutAccount() throws {
+        syncSessionIdentifier = UUID()
         let account = try repositories.accountMetadata.account()
         account.appleUserIdentifierHash = nil
         account.displayName = nil
@@ -524,13 +528,45 @@ final class DailyDataCoordinator {
     }
 
     func setSyncEnabled(_ enabled: Bool) throws {
+        syncSessionIdentifier = UUID()
         let account = try repositories.accountMetadata.account()
         account.syncEnabled = enabled && account.appleUserIdentifierHash != nil
         try repositories.accountMetadata.save()
     }
 
     func readySyncOperations(at date: Date = .now) throws -> [SyncOperationRecord] {
-        try repositories.syncQueue.ready(at: date).filter { $0.attempts < Self.maxRetryAttempts }
+        // Each queued mutation is a complete snapshot (or tombstone). Once an
+        // older attempt is terminal, the newer user intent replaces it; retaining
+        // that terminal predecessor would permanently block the entity.
+        let operations = try repositories.syncQueue.all()
+        for (index, operation) in operations.enumerated()
+            where operation.state != .uploading && operation.attempts >= Self.maxRetryAttempts {
+            guard let identity = SyncEntityIdentity(entityType: operation.entityType, entityIdentifier: operation.entityIdentifier),
+                  let successor = operations.dropFirst(index + 1).first(where: {
+                      $0.state != .completed && $0.state != .uploading
+                          && SyncEntityIdentity(entityType: $0.entityType, entityIdentifier: $0.entityIdentifier) == identity
+                  }) else { continue }
+            if operation.operation == .create && successor.operation == .update {
+                successor.operation = .create
+                successor.idempotencyKey = UUID().uuidString
+                try repositories.syncQueue.save(successor)
+            }
+            try repositories.syncQueue.delete(operation)
+        }
+        let readyIDs = Set(try repositories.syncQueue.ready(at: date).map(\.id))
+        var seen = Set<SyncEntityIdentity>()
+        return try repositories.syncQueue.all().filter { operation in
+            guard operation.state != .completed else { return false }
+            guard let identity = SyncEntityIdentity(entityType: operation.entityType, entityIdentifier: operation.entityIdentifier) else {
+                if readyIDs.contains(operation.id), operation.attempts < Self.maxRetryAttempts {
+                    throw BackendError.invalidPayload
+                }
+                return false
+            }
+            guard seen.insert(identity).inserted else { return false }
+            // A successor must not jump ahead of its predecessor's retry/backoff.
+            return readyIDs.contains(operation.id) && operation.attempts < Self.maxRetryAttempts
+        }
     }
 
     func allSyncOperations() throws -> [SyncOperationRecord] { try repositories.syncQueue.all() }
@@ -539,6 +575,20 @@ final class DailyDataCoordinator {
         operation.state = .uploading
         operation.lastError = nil
         try repositories.syncQueue.save(operation)
+    }
+
+    func resetSyncUploads(idempotencyKeys: Set<String>) throws {
+        var recoveryError: Error?
+        for operation in try repositories.syncQueue.all()
+            where operation.state == .uploading && idempotencyKeys.contains(operation.idempotencyKey) {
+            operation.state = .pending
+            operation.nextAttemptAt = nil
+            // Cancellation/session changes are not failed network attempts.
+            // Preserve the original idempotency key for uncertain server outcomes.
+            do { try repositories.syncQueue.save(operation) }
+            catch { recoveryError = recoveryError ?? error }
+        }
+        if let recoveryError { throw recoveryError }
     }
 
     func markSyncFailed(_ operation: SyncOperationRecord, error: Error, now: Date = .now) throws {
@@ -573,6 +623,7 @@ final class DailyDataCoordinator {
     }
 
     func applyRemoteChange(_ change: SyncConflict) throws {
+        try RemoteSyncPayloadValidator.validate(change)
         switch change.entityType {
         case "meal":
             guard change.operation != .delete || UUID(uuidString: change.entityIdentifier) != nil else { throw BackendError.invalidPayload }
@@ -584,9 +635,16 @@ final class DailyDataCoordinator {
                 let draft = MealDraft(name: remote.name, type: remote.type, date: remote.date, nutrition: remote.nutrition, items: remote.items, provenance: remote.provenance, confidence: remote.confidence, imageData: nil, notes: remote.notes, status: remote.status)
                 if let meal = try repositories.meals.meal(id: id) {
                     meal.update(with: draft)
-                    try repositories.meals.save(meal)
+                    meal.timeZoneIdentifier = remote.timeZoneIdentifier
+                    meal.createdAt = remote.createdAt
+                    meal.updatedAt = change.serverUpdatedAt
+                    try repositories.meals.saveRemote(meal)
                 } else {
-                    try repositories.meals.save(Meal(id: id, name: remote.name, type: remote.type, date: remote.date, nutrition: remote.nutrition, items: remote.items, provenance: remote.provenance, confidence: remote.confidence, notes: remote.notes, status: remote.status))
+                    let meal = Meal(id: id, name: remote.name, type: remote.type, date: remote.date, nutrition: remote.nutrition, items: remote.items, provenance: remote.provenance, confidence: remote.confidence, notes: remote.notes, status: remote.status)
+                    meal.timeZoneIdentifier = remote.timeZoneIdentifier
+                    meal.createdAt = remote.createdAt
+                    meal.updatedAt = change.serverUpdatedAt
+                    try repositories.meals.saveRemote(meal)
                 }
             }
         case "profile":
@@ -635,27 +693,39 @@ final class DailyDataCoordinator {
             let account = try repositories.accountMetadata.account()
             guard account.syncEnabled else { return }
             let payload = try JSONEncoder().encode(value)
-            let existing = try repositories.syncQueue.all().last {
+            let entityOperations = try repositories.syncQueue.all().filter {
                 $0.entityType == entityType
                     && $0.entityIdentifier == identifier
-                    && $0.state != .completed
             }
+            let existing = entityOperations.last { $0.state != .completed && $0.state != .uploading }
             if let existing {
                 existing.operation = existing.operation == .create && operation == .update ? .create : operation
                 existing.payloadData = payload
-                existing.clientRevision = Int(revisionDate.timeIntervalSince1970 * 1_000)
+                existing.clientRevision = account.serverRevision
+                existing.updatedAt = revisionDate
                 existing.idempotencyKey = UUID().uuidString
                 existing.state = .pending
+                existing.attempts = 0
                 existing.nextAttemptAt = nil
                 try repositories.syncQueue.save(existing)
             } else {
-                try repositories.syncQueue.save(SyncOperationRecord(
+                let record = SyncOperationRecord(
                     entityType: entityType,
                     entityIdentifier: identifier,
                     operation: operation,
                     payloadData: payload,
-                    clientRevision: Int(revisionDate.timeIntervalSince1970 * 1_000)
-                ))
+                    clientRevision: account.serverRevision
+                )
+                // Queue causality must survive a clock rollback or equal clock
+                // ticks. updatedAt remains the actual user-mutation timestamp.
+                if let latest = entityOperations.map(\.createdAt).max() {
+                    record.createdAt = Date(timeIntervalSinceReferenceDate: max(
+                        record.createdAt.timeIntervalSinceReferenceDate,
+                        latest.timeIntervalSinceReferenceDate.nextUp
+                    ))
+                }
+                record.updatedAt = revisionDate
+                try repositories.syncQueue.save(record)
             }
         } catch {
             logger.error("Sync enqueue failed entity=\(entityType, privacy: .public) error=\(String(describing: type(of: error)), privacy: .public) \(error.localizedDescription, privacy: .private)")

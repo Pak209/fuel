@@ -1,5 +1,31 @@
 # Fuel — TestFlight Implementation Plan
 
+> **Historical implementation plan — based on the 2026-08-22 audit.** This document
+> preserves the earlier local-only beta plan. Its workstream lists, account-state
+> claims, example commands, and estimates do not describe what remains today.
+> [REMAINING_SCOPE.md](REMAINING_SCOPE.md) is the authoritative current work list;
+> use [RELEASE_GATES.md](RELEASE_GATES.md) for current release-evidence requirements.
+
+Several listed implementation tasks are already present in source: the app/widget
+team is `5YJJCSFSQM`, the icon catalog maps `AppIcon.png`, and `Fuel/Info.plist`
+contains the launch-screen declaration, backend URL mapping, and encryption
+declaration. The privacy policy screen and hostable policy files exist. The current
+app entitlement file declares HealthKit/background delivery and the App Group;
+Sign in with Apple is absent for the local-only build. Recheck source and recorded
+tests before repeating any workstream below. Distribution provisioning, App Store
+Connect acceptance, published policy, and the sustained device trial still require
+their own evidence.
+
+The old v1/v2 split below does not remove backend, recognition, subscriptions, or
+family/sharing work from the current full-app goal. Its short code-work estimate
+applies only to that historical beta plan. Examples also retain old paths and build
+numbers and must be resolved against the current project before use.
+
+Sources for this correction: `Fuel.xcodeproj/project.pbxproj`,
+`Fuel/Assets.xcassets/AppIcon.appiconset/Contents.json`, `Fuel/Info.plist`,
+`Fuel/Fuel.entitlements`, `Fuel/Features/Profile/PrivacyPolicyView.swift`, and
+`docs/legal/privacy-policy.md`.
+
 Goal: take Fuel from its current state (clean unsigned Release archive, working local app, empty icon set, no team) to **a build uploaded to App Store Connect and available to internal TestFlight testers**.
 
 Derived from `docs/quality/APP_STORE_READINESS.md` (2026-08-22) and direct inspection of the repo. Source of truth for build settings: `Fuel.xcodeproj/project.pbxproj` (configurations `Debug`/`Staging`/`Release`; app-target blocks at lines ~184, ~212 (Staging), ~211 (Release); widget-target blocks at ~218/~242/~265). Archive scheme: `Fuel.xcodeproj/xcshareddata/xcschemes/Fuel.xcscheme` (ArchiveAction = Release, which pulls `Config/Production.xcconfig`).

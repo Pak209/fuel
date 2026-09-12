@@ -5,15 +5,29 @@ Earlier phase matrices describe implemented client features, not proof of a depl
 service or a completed public release. Check source, test results, and deployment
 evidence before closing an item.
 
+## Latest verified client checkpoint
+
+- Final full suite: **202 passed, zero failed/skipped** on iPhone 16, including
+  nine UI tests and the new sync/contract/payload/cancellation/ordering coverage.
+- Result bundle: `test_sim_2026-09-12T06-14-41-414Z_pid35601_92d5789e.xcresult`.
+- Release build and launch passed:
+  `build_run_sim_2026-09-12T06-17-23-583Z_pid35601_d3b31ec8.log`.
+- Artifacts live under the local XcodeBuildMCP workspace
+  `/Users/danielpak/Library/Developer/XcodeBuildMCP/workspaces/Fuel-a07e40686684/`.
+- These supersede the earlier 142-test checkpoint below for client verification.
+  They do not close the real-device trial, account-isolation, or backend gates.
+
 ## 1. Finish local reliability and device validation
 
-- Full regression checkpoint: 142 tests passed, zero failed/skipped on iPhone 16
+- Earlier regression checkpoint: 142 tests passed, zero failed/skipped on iPhone 16
   (2026-09-11 local date). Result bundle:
   `test_sim_2026-09-12T05-56-11-054Z_pid35601_3b7c8b70.xcresult` in the local
   XcodeBuildMCP Fuel workspace.
 - Release simulator build passed after the privacy/reliability changes:
   `build_sim_2026-09-12T05-59-03-898Z_pid35601_91b6a253.log`.
-- Commit and synchronize the verified checkpoint to the authorized GitHub repo.
+- The verified checkpoint `e062971` was committed and pushed to
+  `origin/codex/remaining-scope` in the authorized GitHub repo. Newer work must
+  independently pass verification before becoming the next checkpoint.
 - Verify real-device HealthKit permissions and refresh, notification actions,
   widget writes, offline/relaunch behavior, lock/unlock, battery, and accessibility.
 - Complete a daily-use trial; simulator tests do not substitute for elapsed use.
@@ -33,16 +47,23 @@ need the physical-device trial described in `DAILY_USE_TRIAL.md`.
 
 ## 2. Complete account and sync correctness
 
-- Pull existing records on sign-in even when the local mutation queue is empty.
+- Implemented client-side in the current checkpoint: empty-queue pull with a
+  persisted cursor, count/byte-aware batching, full response/payload validation,
+  shared overlapping uploads, cancellation/session queue recovery, preservation
+  of edits during upload, terminal-predecessor supersession, clock-rollback-safe
+  queue ordering, and active UI/settings refresh after remote writes.
+- These are local/mock-transport results, not proof of a live cloud service.
 - Bind pending data and credentials to the correct account; define account-switch
   and legacy queue migration behavior without sending one account's data to another.
-- Serialize overlapping sync calls and protect newer local edits while older
-  requests are in flight.
-- Validate complete batch outcomes, remote payload semantics, revision ordering,
-  and cursor advancement before accepting results.
-- Refresh active profile, goals, preferences, meals, and summaries after remote writes.
-- Handle restored metadata without credentials, expired sessions, cancellation,
-  incomplete responses, retries, and remote deletion/photo cleanup.
+- Bind atomic credentials to account/backend environment; reconcile restored
+  metadata without credentials and implement refresh/reauthentication/revocation.
+- Guard account identity before transport attempts and across account lifecycle
+  actions; the current response-generation check alone is not sufficient.
+- Finish transactional persistence recovery, bounded repeated-conflict behavior,
+  authentication retry policy, and remote deletion/photo cleanup.
+- Reuse domain limits at local/outgoing boundaries, define sync-disabled edits,
+  and cover any promised records beyond the current five synced entity types
+  (favorites and goal history are not currently synced).
 - Prove fresh-install restore and two-device conflict behavior against the backend.
 
 ## 3. Build and deploy the production backend
@@ -89,5 +110,9 @@ All three backend URL settings are empty.
   screenshots, release archive, TestFlight testing, and submission preparation.
 - Audit every original requirement against current evidence before closing the goal.
 
-The full goal remains open. See `RELEASE_GATES.md` for evidence requirements;
-some statements in that older document predate the current Apple signing setup.
+The full goal remains open. See `RELEASE_GATES.md` for evidence requirements.
+Older readiness/TestFlight reports are labeled historical and should not be used
+to repeat already completed signing, icon, or launch-screen source changes.
+
+Latest device check (2026-09-11 local date): the paired iPhone 14 Pro is reported
+unavailable. No new physical installation or completed trial is claimed.

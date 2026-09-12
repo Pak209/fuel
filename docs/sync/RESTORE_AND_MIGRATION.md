@@ -1,234 +1,134 @@
 # Fuel Restore and Account Migration
 
-This document describes what actually happens today when Fuel is reinstalled or
-moved to a new device, and how account/data migration behaves given the current
-sync implementation. Where the codebase does not yet implement something implied
-by the product goal, that gap is called out explicitly rather than described as
-working.
+Current client behavior, reviewed 2026-09-11. This is not evidence of a deployed
+backend or a successful real-device restore. All backend URLs remain empty;
+production cloud functionality must remain disabled until the gates below close.
 
-Grounding files: `Fuel/App/FuelApp.swift`, `Fuel/Services/BackendServices.swift`,
-`Fuel/Services/SyncService.swift`, `Fuel/Services/DailySummaryService.swift`,
-`Fuel/Services/DataManagementService.swift`, `Backend/README.md`,
-`docs/security/PRIVACY_DATA_MAP.md`.
+Grounding: `Fuel/Services/SyncService.swift`, `BackendServices.swift`,
+`RemoteSyncPayloadValidator.swift`, `DailySummaryService.swift`,
+`Fuel/Persistence/Repositories.swift`, and `Backend/README.md`.
 
-## What survives an app reinstall today
+## Local storage and restore boundaries
 
-Fuel's persistent state lives in three places, each with different reinstall
-behavior:
+- Meals, hydration, profiles, targets, preferences, and pending work live in the
+  local SwiftData store. There is no configured CloudKit-backed store.
+- Fuel does not implement a local JSON import/restore flow. Export is an
+  inspectable copy, not a demonstrated round-trip backup mechanism.
+- Keychain credentials are configured as
+  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`. Restored account metadata
+  must not be treated as proof that valid credentials exist.
+- Widgets use an App Group summary. Hydration commands use a protected,
+  cross-process-locked App Group queue, consumed idempotently by the main app.
+- Meal photos are local files and are absent from the meal sync/export DTO.
+  Account restore therefore does not restore photos through this protocol.
+- HealthKit samples are not uploaded in sync. Fuel reads them through HealthKit
+  separately, subject to availability and permission.
 
-| Store | What it holds | Survives a plain delete + reinstall? | Survives a device migration via encrypted backup/iCloud restore? |
-| --- | --- | --- | --- |
-| SwiftData store (`ModelContainer`) | Meals, hydration, profile, targets, favorites, goal history, recommendation feedback, `SyncOperationRecord` queue, `AccountMetadataRecord`, `RemoteConfigurationRecord` | No — a fresh install gets a fresh, empty container | Likely yes — see below |
-| Keychain (`KeychainCredentialStore`) | Access token, refresh token, Apple opaque user identifier | Not guaranteed by app code either way | No |
-| App Group `UserDefaults` (widget summary) | At-a-glance score/remaining targets for the widget | No | Likely yes, but is regenerated on next app run regardless |
+Actual OS backup, reinstall, and device-migration behavior still needs a
+physical-device test. Do not promise data recovery from a fresh reinstall while
+the backend is unavailable.
 
-- The SwiftData store is created with a plain `ModelConfiguration(schema:)` and
-  `FuelMigrationPlan` — there is no CloudKit-backed configuration and no
-  `isExcludedFromBackup`/file-protection override applied to the store files
-  (`Fuel/App/FuelApp.swift:11-27`; confirmed by grepping the whole `Fuel/` tree
-  for `isExcludedFromBackup` — no hits). A plain "delete app, reinstall from the
-  App Store" wipes the app's container, so the store starts empty; nothing
-  local survives that path today. This matches `docs/security/PRIVACY_DATA_MAP.md`,
-  which lists all SwiftData-backed rows as living in "SwiftData, protected app
-  container" with no mention of a durable off-device local backup channel.
-- Because no backup-exclusion flag is set, an iOS system backup (encrypted
-  local backup via Finder/iTunes, or an iCloud device backup) includes the
-  app's container by default, per standard iOS behavior — Fuel does not opt in
-  or out of this explicitly in code. Restoring such a backup onto a new device
-  would typically bring the SwiftData store back, including the sync queue and
-  `AccountMetadataRecord`.
-- Keychain items saved via `KeychainCredentialStore` use
-  `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
-  (`Fuel/Services/BackendServices.swift:136`). Per Apple's documented Keychain
-  accessibility semantics, "ThisDeviceOnly" items are never migrated to a new
-  device by any backup or restore mechanism — this is enforced by iOS, not by
-  Fuel. So access token, refresh token, and Apple user identifier are always
-  absent after a device-to-device migration. Whether they survive a same-device
-  delete+reinstall is an iOS Keychain behavior outside this app's control; the
-  app does not add any code that would preserve or clear them either way.
+## Pull and push behavior implemented in the client
 
-**Open item / inconsistency to watch for:** if a backup restores the SwiftData
-store (so `AccountMetadataRecord.syncEnabled` and `appleUserIdentifierHash` are
-still set) onto a device whose Keychain has no token, the app's local metadata
-says "cloud connected" while the credential needed to actually talk to the
-backend is missing. See "Open items" below for how the sync path currently
-handles that state (it does not have a distinct recovery path for it).
+1. A sync requires a configured backend, an enabled account, and a stored account
+   identifier. These checks are necessary, not sufficient production identity
+   validation; account/credential isolation remains unfinished.
+2. Every batch sends `sinceRevision`, the last applied account cursor.
+   **An empty upload queue still sends a request**, so fresh-install pull no
+   longer depends on making a dummy local edit.
+3. Uploads use immutable snapshots of the selected queue entries. The request
+   contains at most 100 operations and must fit the actual 1 MB JSON/base64 body
+   limit. Byte-limited batches leave later entries queued.
+4. The HTTP client and engine both validate the complete response envelope.
+   Every submitted operation must have exactly one accepted or conflicted
+   outcome; foreign/duplicate outcomes, invalid identities, regressing cursors,
+   out-of-order feed revisions, and oversized data are rejected.
+5. Every remote payload and conflict is semantically validated before any
+   response mutation is applied, including a conflict the client expects to win.
+   Validation covers nested identifiers, dates, time zones, bounded text and
+   collections, finite nutrition/serving arithmetic, and settings schedules.
+   Incomplete preference snapshots cannot silently reset local settings.
+6. Successful remote changes refresh the active profile, goals, preferences,
+   notification schedules, and dashboard data. Remote meal creation/update
+   preserves the remote creation time/time zone and server mutation timestamp.
 
-## How a signed-in user with a configured backend restores
+Prevalidation prevents malformed later records from causing earlier records to
+be partially accepted. It is **not** a single disk transaction: repository-save
+failures during application still require stronger rollback/replay guarantees.
 
-1. **Backend must be configured.** `BackendConfiguration.isConfigured` requires
-   `FUEL_BACKEND_BASE_URL` to resolve to a validated HTTPS origin (Debug also
-   allows `localhost`/`127.0.0.1`) — `Fuel/Services/BackendServices.swift:18-33`.
-   If it isn't configured, `CloudSyncEngine.synchronize` returns `.localOnly`
-   immediately (`Fuel/Services/SyncService.swift:59`) and nothing below applies.
-2. **Sign-in.** `AccountSessionService.signIn` (`Fuel/Services/BackendServices.swift:453-476`)
-   calls `POST /v1/auth/apple`, then saves the access token, refresh token, and
-   Apple user identifier to Keychain. `AppState.completeAppleSignIn`
-   (`Fuel/App/AppState.swift:331-338`) applies the resulting `AccountSessionResult`
-   to the local `AccountMetadataRecord` and, if `cloudConnected` is true,
-   immediately calls `synchronizeNow()`.
-3. **The sync call itself only pushes what's locally queued.** `CloudSyncEngine.synchronize`
-   reads the local pending-operation queue with `coordinator.readySyncOperations(at:)`
-   and, critically, **returns `.current(now)` without ever calling the backend if
-   that queue is empty**: `guard !operations.isEmpty else { return .current(now) }`
-   (`Fuel/Services/SyncService.swift:62-66`). Only when there is at least one
-   locally queued mutation does it call `POST /v1/sync`
-   (`Fuel/Services/BackendServices.swift:325-327`), whose response can carry back
-   `conflicts` and an optional `remoteChanges` array
-   (`SyncBatchResponse`, `Fuel/Services/BackendServices.swift:247-251`). Those are
-   applied locally through `coordinator.applyRemoteChange`
-   (`Fuel/Services/DailySummaryService.swift:486-511`), which decodes typed
-   payloads per entity type (`meal`, `profile`, `targets`, etc.) and writes them
-   into the local SwiftData store.
+## Concurrent edits, cancellation, and retry
 
-**This is the central fact to document accurately:** as implemented, Fuel does
-not have a "pull my existing cloud data" step that is independent of pushing a
-local change. `Backend/README.md`'s endpoint inventory has only `POST /v1/sync`
-— no `GET /v1/sync` or equivalent full-state fetch — and no code path calls
-`backend.synchronize` with an empty local queue just to see what the server has.
-So on the common "fresh install, sign in, queue is empty" path, a person's
-existing cloud data does **not** come down automatically. It only arrives once
-some local edit (a meal save, a target change, etc.) enqueues an operation and
-the resulting round-trip happens to carry `remoteChanges` back with it. Any
-documentation or support answer that says "sign in and your data comes back" is
-describing the intended/planned behavior, not what the code guarantees today —
-this is flagged as an open item below, not something this document should
-paper over.
+- Overlapping calls in the same coordinator/session share one transport.
+- Canceling one waiter does not cancel another caller's upload. Canceling the
+  last waiter cancels the transport and resets the submitted uploading rows to
+  pending without spending retry attempts or changing their idempotency keys.
+  Recovery storage errors remain visible.
+- A session change invalidates the old response. Matching live upload rows are
+  reset without resurrecting deleted rows or changing newer successors.
+  This response guard does not yet bind transport credentials to an immutable
+  account scope; it is not proof of safe account switching.
+- Editing during upload creates a successor instead of mutating the submitted
+  record. Accepted/conflicted predecessor responses cannot acknowledge or
+  overwrite that newer edit.
+- Same-entity queue creation times are assigned strictly after existing entries,
+  including when the wall clock rolls back. Mutation timestamps remain separate
+  from queue ordering and retry bookkeeping.
+- An older nonterminal entry blocks its successor through backoff. Once the
+  older entry exhausts its retries, a newer complete snapshot/tombstone can
+  supersede it. Unsent create intent is preserved for an update successor.
+- Pulled values never replace an unacknowledged local pending change.
+- If no successor exists, conflicts use the newer mutation timestamp, then
+  higher revision, with the server winning ties. A local win rebases and retries
+  with a fresh key; a remote win applies the validated server value.
+- Ordinary request failures keep queued values and stable keys with bounded
+  attempts/backoff. Repeated conflict responses and authentication failures need
+  additional lifecycle/retry policy before production enablement.
 
-Meal photos are excluded from that round-trip regardless: the sync payload for
-a meal reuses `ExportedMeal` (`Fuel/Services/DataManagementService.swift:12-39`),
-which has no image field, and `applyRemoteChange`'s meal branch always
-constructs the local draft with `imageData: nil`
-(`Fuel/Services/DailySummaryService.swift:495`). This matches
-`docs/security/PRIVACY_DATA_MAP.md`'s row for meal photos ("Not in JSON
-export"). So even once meal data does sync, the original photo does not travel
-with it.
+## Server obligations
 
-HealthKit-derived data (activity, sleep, workouts, body measurements) is never
-part of this at all — `Backend/README.md`'s "Sync semantics" section states
-"HealthKit samples are not part of the sync entity set," and that history comes
-back on a new device through Health's own iCloud sync, independent of Fuel.
+The server must authorize each entity and idempotency key within the authenticated
+account. Create/update carry a full entity snapshot; deletion carries a tombstone.
+The exact client/server upsert and conflict rules must be contract-tested.
 
-## Conflict behavior on restore
+`response.serverRevision` is a **fully represented page cursor**, not necessarily
+the latest global revision. The server must never advance it past omitted remote
+changes. Revision gaps alone cannot prove feed completeness on the client.
 
-Conflict resolution is deterministic and defined in
-`SyncConflictResolver.resolve` (`Fuel/Services/SyncService.swift:18-24`):
+Remote pages contain at most 500 unique entity snapshots/tombstones in strictly
+increasing revision order above the request cursor. Conflicted entities must not
+also appear in that page. Accepted writes may be echoed canonically; newer local
+successors remain protected.
 
-```swift
-func resolve(local: SyncOperationRecord, remote: SyncConflict) -> SyncConflictDecision {
-    if local.updatedAt > remote.serverUpdatedAt { return .useLocal }
-    if local.updatedAt < remote.serverUpdatedAt { return .useRemote }
-    return local.clientRevision > remote.serverRevision ? .useLocal : .useRemote
-}
-```
+## Remaining production blockers
 
-- Newer `updatedAt` wins, matching the rule stated in `Backend/README.md`
-  ("Sync semantics" — "Fuel chooses the newer `updatedAt`").
-- Exactly equal timestamps fall back to comparing `clientRevision` against the
-  server's `serverRevision`; the higher revision wins, and a tie (equal
-  timestamp and equal revision) resolves to `.useRemote` — i.e., the server
-  wins ties, per `Backend/README.md`'s "server winning ties" line.
-- A local win (`.useLocal`) does not overwrite the server outright: it calls
-  `coordinator.retrySyncOperation(local, serverRevision:)`
-  (`Fuel/Services/SyncService.swift:101`), which re-queues the operation
-  against the server's returned revision for a fresh push, consistent with
-  `Backend/README.md`'s "A local win receives a new idempotency key and retries
-  against the returned server revision."
-- A remote win (`.useRemote`) applies the server's payload locally via
-  `applyRemoteChange` and then marks the original local operation accepted
-  (`Fuel/Services/SyncService.swift:102-104`), so it is not retried.
-- This matters directly for restore: right after a migration, if a locally
-  queued edit collides with something the server already has (e.g., a meal
-  edited offline before the migration, now conflicting with a newer edit made
-  from another device), the newer-timestamp-then-revision-then-server-wins-ties
-  rule above is what decides which copy survives — not a manual merge prompt.
+- Account-scoped datasets, queues, cursors, caches, and artifacts; legacy migration
+  and explicit consent before attaching local records to an account.
+- Atomic credentials bound to backend environment and server account identity;
+  expiry/refresh, reauthentication, revocation, and startup reconciliation.
+- Immutable account/session checks before every transport attempt, not only
+  after the response; cancellation across sign-in, sign-out, export, and deletion.
+- A deliberate policy for edits made while sync is disabled.
+- Shared domain limits at local-save and outgoing boundaries, so one device
+  cannot store values another device must reject.
+- Consistent remote deletion/photo cleanup and transactional failure recovery.
+- Bounded repeated-conflict recovery and non-destructive authentication failures.
+- Complete restore coverage for any additional promised records. The current
+  sync allowlist is meal, hydration, profile, targets, and preferences, not the
+  entire local database (for example favorites and goal history).
+- Deployed backend, pagination/contract conformance, backup recovery, retention,
+  full account export/deletion, authorization tests, and operational monitoring.
+- Real two-device tests for initial restore, offline edits, account switching,
+  expired credentials, conflicts, deletion, and interrupted persistence.
 
-## Account migration between devices
+## Verification
 
-Two realistic paths, both grounded in the mechanics above:
+The focused sync suites passed 92 tests on the iPhone 16 simulator. After the
+additional ordering and cleanup fixes, the final full suite passed **202 tests,
+zero failed/skipped**, including the two new clock-ordering cases. Release build
+and launch also passed. Artifact names are recorded in
+`docs/quality/REMAINING_SCOPE.md`.
 
-1. **Sign in with Apple ID on a brand-new install, no backup restore.** The
-   local SwiftData store starts empty, so the sync queue is empty, so — per the
-   "How a signed-in user restores" section above — the first `synchronize()`
-   call after sign-in is a no-op unless the person immediately makes an edit.
-   Today, the practical way to pull existing cloud data onto a new device is to
-   make some local change (even a trivial one) so a real `POST /v1/sync`
-   round-trip happens and `remoteChanges` can come back. This is a real
-   usability gap, not a documented feature — see "Open items."
-2. **Restore an encrypted backup or iCloud backup onto a new device, then sign
-   in again.** The SwiftData store (meals, hydration, targets, profile,
-   `AccountMetadataRecord`, sync queue) likely comes back with the backup
-   (no exclusion flags are set — see above), but Keychain tokens do not
-   (ThisDeviceOnly). The person must sign in again;
-   `AccountSessionService.signIn` overwrites the Keychain credentials and
-   `completeAppleSignIn` triggers `synchronizeNow()`. Whether that call does
-   anything meaningful depends on whether the restored sync queue still has
-   pending entries — if it's empty, the same "no-op sync" behavior in path 1
-   applies.
-
-In both cases, local-only use (no sign-in) is unaffected: a person who never
-enables cloud sync keeps using the app exactly as before, per
-`SECURITY.md`'s invariant that "a person can use the core app without creating
-an account or enabling cloud transfer."
-
-## Live cloud sync is disabled until backend + Apple credentials are configured
-
-This is a hard, code-enforced gate, not a policy statement alone:
-
-- `BackendConfiguration.isConfigured`/`validatedBaseURL` require a real HTTPS
-  origin from `FUEL_BACKEND_BASE_URL` (Debug-only `localhost` exception)
-  (`Fuel/Services/BackendServices.swift:18-33`). With no value configured, the
-  app runs in local-only mode by construction.
-- `CloudSyncEngine.synchronize` returns `.localOnly` whenever
-  `backend.isConfigured` is false (`Fuel/Services/SyncService.swift:59`), and
-  `AppState.synchronizeNow()` short-circuits to `.localOnly` if the account
-  isn't `cloudConnected` (`Fuel/App/AppState.swift:365-366`).
-- `Backend/README.md` states this directly: "`BackendAPIClient` is inert until
-  `FUEL_BACKEND_BASE_URL` resolves to a validated HTTPS URL... this directory
-  specifies the service that must exist before cloud sync or remote recognition
-  is enabled for users; it is not evidence that a production service has been
-  deployed."
-- `PHASES6_9_ROADMAP.md` lists this as an explicit, currently-unchecked gate:
-  "Live cloud sync remains disabled until a reviewed backend/container and
-  Apple credentials are configured," alongside "A deployed backend with
-  development/staging/production URLs and server-held credentials" under
-  "External configuration and review gates."
-
-No backend deployment exists in this repository. Everything above describes
-client behavior against a hypothetical correctly configured backend; it is not
-evidence that one has been stood up.
-
-## Open items
-
-- **No independent "pull my cloud data" step.** As detailed above,
-  `CloudSyncEngine.synchronize` never calls the backend when the local sync
-  queue is empty (`Fuel/Services/SyncService.swift:62-66`), so restoring an
-  account's existing cloud data onto a fresh install/new device is not
-  guaranteed to happen on sign-in alone. Closing this requires either an
-  explicit initial-pull request (not in `Backend/README.md`'s endpoint
-  inventory today) or a deliberate design decision to keep push-triggered pull
-  and document the workaround (make a local edit) as expected behavior.
-- **No recovery path for "local metadata says connected, Keychain has no
-  token."** This state can occur after a backup restores the SwiftData store
-  onto a device whose Keychain doesn't carry the ThisDeviceOnly token (new
-  device migration) or after any other event that clears Keychain without
-  clearing `AccountMetadataRecord`. A sync attempt in this state fails
-  authentication inside `send(...)` with `BackendError.missingCredential`
-  (`Fuel/Services/BackendServices.swift:369`), which — if there happen to be
-  queued operations — is treated like any other transient failure:
-  `markSyncFailed` increments `attempts` and schedules bounded exponential
-  backoff (`Fuel/Services/DailySummaryService.swift:455-465`) up to
-  `maxRetryAttempts` (8, `Fuel/Services/DailySummaryService.swift:73`), then
-  gives up silently rather than surfacing a distinct "sign in again" prompt
-  tied to that specific cause.
-- **Meal photos never migrate through sync**, only through whatever backup
-  mechanism (if any) covers the local `Application Support` photo files — see
-  the "Meal photos" row in `docs/security/PRIVACY_DATA_MAP.md`.
-- **Backend deployment, retention, and restore-drill requirements are an
-  external gate**, not something this client codebase can satisfy alone — see
-  `Backend/README.md`'s "Operational release evidence" section and
-  `docs/quality/RELEASE_GATES.md`.
-- **No automated test** in the repository currently exercises the "empty
-  queue on sign-in" no-op path or the conflict-resolution tie-break rules
-  end-to-end against a real backend contract (contract tests are described as
-  a prerequisite in `Backend/README.md`, not as already existing).
+Suites: `SyncContinuityTests`, `SyncContractTests`,
+`RemoteSyncPayloadTests`, and `SyncSecurityTests`. They exercise real local
+persistence with in-memory/scripted transport. They do not prove a working live
+backend, real Keychain migration, or two-device cloud continuity.

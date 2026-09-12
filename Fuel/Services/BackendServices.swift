@@ -301,12 +301,196 @@ struct SyncConflict: Codable, Hashable, Sendable {
     var serverPayload: Data
 }
 
-struct SyncBatchRequest: Codable, Sendable { var operations: [SyncOperationPayload] }
+struct SyncBatchRequest: Codable, Sendable {
+    var operations: [SyncOperationPayload]
+    /// The last completely applied account revision. Nil starts the change feed at zero.
+    var sinceRevision: Int?
+
+    init(operations: [SyncOperationPayload], sinceRevision: Int? = nil) {
+        self.operations = operations
+        self.sinceRevision = sinceRevision
+    }
+}
 struct SyncBatchResponse: Codable, Sendable {
     var acceptedIdempotencyKeys: [String]
     var conflicts: [SyncConflict]
+    /// A fully represented change-feed cursor. A paginated server must not advance this
+    /// past omitted remote changes; the client cannot infer missing records from a revision gap.
     var serverRevision: Int
     var remoteChanges: [SyncConflict]?
+}
+
+/// A normalized identity for comparisons across queue records and server envelopes.
+struct SyncEntityIdentity: Hashable, Sendable {
+    let entityType: String
+    let entityIdentifier: String
+
+    init?(entityType: String, entityIdentifier: String) {
+        self.entityType = entityType
+        switch entityType {
+        case "meal", "hydration":
+            guard let id = UUID(uuidString: entityIdentifier) else { return nil }
+            self.entityIdentifier = id.uuidString
+        case "profile", "preferences":
+            guard entityIdentifier == "primary" else { return nil }
+            self.entityIdentifier = entityIdentifier
+        case "targets":
+            guard entityIdentifier == "current" else { return nil }
+            self.entityIdentifier = entityIdentifier
+        default:
+            return nil
+        }
+    }
+}
+
+/// Validates the whole wire envelope before a caller acknowledges queue entries or applies
+/// any remote values. Both the HTTP client and the sync engine use this boundary so a
+/// replacement transport cannot bypass it. Entity payload semantics are validated separately.
+enum SyncContractValidator {
+    static let maximumOperations = 100
+    static let maximumRemoteChanges = 500
+    static let maximumEntityPayloadBytes = 500_000
+    static let maximumResponseBytes = 5_000_000
+
+    /// Selects an ordered prefix that can actually be sent, including base64 and JSON
+    /// overhead. Records beyond the returned prefix remain pending for the next batch.
+    /// An invalid or individually oversized examined record is an explicit error; a valid
+    /// record that only exceeds the combined byte budget ends the batch without skipping it.
+    static func makeBatchRequest(
+        from orderedOperations: [SyncOperationPayload],
+        sinceRevision: Int? = nil
+    ) throws -> SyncBatchRequest {
+        var request = SyncBatchRequest(operations: [], sinceRevision: sinceRevision)
+        try validateRequest(request)
+
+        for operation in orderedOperations.prefix(maximumOperations) {
+            // Distinguish an unsendable record from two sendable records whose combined
+            // encoded body is too large. Only the latter can be retried as another batch.
+            try validateRequest(.init(operations: [operation], sinceRevision: sinceRevision))
+            var candidate = request
+            candidate.operations.append(operation)
+            do {
+                try validateRequest(candidate)
+                request = candidate
+            } catch BackendError.payloadTooLarge {
+                guard !request.operations.isEmpty else { throw BackendError.payloadTooLarge }
+                break
+            }
+        }
+        return request
+    }
+
+    static func validateRequest(_ request: SyncBatchRequest) throws {
+        guard request.operations.count <= maximumOperations,
+              (request.sinceRevision ?? 0) >= 0 else { throw BackendError.invalidPayload }
+
+        var keys = Set<String>()
+        var entities = Set<SyncEntityIdentity>()
+        var payloadBytes = 0
+        for operation in request.operations {
+            guard isValidIdempotencyKey(operation.idempotencyKey),
+                  keys.insert(operation.idempotencyKey).inserted,
+                  let identity = entityIdentity(type: operation.entityType, identifier: operation.entityIdentifier),
+                  entities.insert(identity).inserted,
+                  operation.clientRevision >= 0,
+                  operation.updatedAt.timeIntervalSince1970.isFinite,
+                  isSupportedOperation(operation.operation, for: operation.entityType) else {
+                throw BackendError.invalidPayload
+            }
+            guard operation.payload.count <= maximumEntityPayloadBytes else { throw BackendError.payloadTooLarge }
+            payloadBytes += operation.payload.count
+            guard payloadBytes <= BackendEndpoint.mealSync.maximumRequestBytes else { throw BackendError.payloadTooLarge }
+        }
+
+        guard try encodedSize(request) <= BackendEndpoint.mealSync.maximumRequestBytes else {
+            throw BackendError.payloadTooLarge
+        }
+    }
+
+    static func validateResponse(_ response: SyncBatchResponse, for request: SyncBatchRequest) throws {
+        try validateRequest(request)
+        let sinceRevision = request.sinceRevision ?? 0
+        guard response.serverRevision >= sinceRevision,
+              response.acceptedIdempotencyKeys.count <= request.operations.count,
+              response.conflicts.count <= request.operations.count,
+              (response.remoteChanges?.count ?? 0) <= maximumRemoteChanges else {
+            throw BackendError.invalidResponse
+        }
+
+        let submittedKeys = Set(request.operations.map(\.idempotencyKey))
+        let acceptedKeys = Set(response.acceptedIdempotencyKeys)
+        guard acceptedKeys.count == response.acceptedIdempotencyKeys.count,
+              acceptedKeys.isSubset(of: submittedKeys) else { throw BackendError.invalidResponse }
+
+        let submittedEntities = Set(request.operations.compactMap {
+            entityIdentity(type: $0.entityType, identifier: $0.entityIdentifier)
+        })
+        var conflictEntities = Set<SyncEntityIdentity>()
+        var payloadBytes = 0
+        for conflict in response.conflicts {
+            let identity = try validateRemoteEnvelope(conflict, maximumRevision: response.serverRevision)
+            payloadBytes += conflict.serverPayload.count
+            guard payloadBytes <= maximumResponseBytes else { throw BackendError.invalidResponse }
+            guard submittedEntities.contains(identity), conflictEntities.insert(identity).inserted else {
+                throw BackendError.invalidResponse
+            }
+        }
+
+        // A partial or contradictory outcome must leave the entire local batch untouched.
+        for operation in request.operations {
+            guard let identity = entityIdentity(type: operation.entityType, identifier: operation.entityIdentifier),
+                  acceptedKeys.contains(operation.idempotencyKey) != conflictEntities.contains(identity) else {
+                throw BackendError.invalidResponse
+            }
+        }
+
+        var remoteEntities = Set<SyncEntityIdentity>()
+        var lastRemoteRevision = sinceRevision
+        for change in response.remoteChanges ?? [] {
+            let identity = try validateRemoteEnvelope(change, maximumRevision: response.serverRevision)
+            payloadBytes += change.serverPayload.count
+            guard payloadBytes <= maximumResponseBytes else { throw BackendError.invalidResponse }
+            guard change.serverRevision > lastRemoteRevision,
+                  remoteEntities.insert(identity).inserted,
+                  !conflictEntities.contains(identity) else { throw BackendError.invalidResponse }
+            lastRemoteRevision = change.serverRevision
+        }
+
+        // An accepted entity can also appear in the feed as the canonical server echo.
+        // The engine still protects newer local edits before applying that echo.
+        guard try encodedSize(response) <= maximumResponseBytes else { throw BackendError.invalidResponse }
+    }
+
+    private static func entityIdentity(type: String, identifier: String) -> SyncEntityIdentity? {
+        SyncEntityIdentity(entityType: type, entityIdentifier: identifier)
+    }
+
+    private static func isSupportedOperation(_ operation: SyncOperationKind, for entityType: String) -> Bool {
+        operation != .delete || entityType == "meal" || entityType == "hydration"
+    }
+
+    private static func isValidIdempotencyKey(_ key: String) -> Bool {
+        guard !key.isEmpty, key.utf8.count <= 128 else { return false }
+        return key.utf8.allSatisfy { byte in
+            (48...57).contains(byte) || (65...90).contains(byte) || (97...122).contains(byte)
+                || byte == 45 || byte == 46 || byte == 95
+        }
+    }
+
+    private static func validateRemoteEnvelope(_ change: SyncConflict, maximumRevision: Int) throws -> SyncEntityIdentity {
+        guard let identity = entityIdentity(type: change.entityType, identifier: change.entityIdentifier),
+              isSupportedOperation(change.operation, for: change.entityType),
+              change.serverRevision >= 0, change.serverRevision <= maximumRevision,
+              change.serverUpdatedAt.timeIntervalSince1970.isFinite,
+              change.serverPayload.count <= maximumEntityPayloadBytes else { throw BackendError.invalidResponse }
+        return identity
+    }
+
+    private static func encodedSize<Value: Encodable>(_ value: Value) throws -> Int {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(value).count
+    }
 }
 
 struct AccountExportResponse: Codable, Sendable { var downloadURL: URL; var expiresAt: Date }
@@ -403,8 +587,10 @@ actor BackendAPIClient: BackendServicing {
     }
 
     func synchronize(_ request: SyncBatchRequest, idempotencyKey: String) async throws -> SyncBatchResponse {
-        guard request.operations.count <= 100 else { throw BackendError.invalidPayload }
-        return try await send(.mealSync, method: "POST", body: request, idempotencyKey: idempotencyKey)
+        try SyncContractValidator.validateRequest(request)
+        let response: SyncBatchResponse = try await send(.mealSync, method: "POST", body: request, idempotencyKey: idempotencyKey)
+        try SyncContractValidator.validateResponse(response, for: request)
+        return response
     }
 
     func recommendation(_ request: RemoteRecommendationRequest) async throws -> RemoteRecommendationResponse {
